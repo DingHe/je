@@ -36,6 +36,10 @@ import com.sleepycat.je.DatabaseException;
  *
  * @author Mark Hayes
  */
+// collections.ship.entity 与 collections.ship.basic 属于同一组 Shipments（供应商—零件—供货关系）示例。理解它们时，最重要的是区分两层：
+//- basic：重点在于通过 JE Collections API，把数据库记录包装成 Map 等集合视图。
+//- entity：重点在于使用 JE 的 Direct Persistence Layer（DPL），把 Java 实体对象直接映射为数据库中的持久化记录。
+//DPL 的核心注解包括 @Entity、@PrimaryKey、@SecondaryKey 等。它让开发者通过对象模型表达持久化数据，而不必手工完成每个字段的序列化和数据库 Key 的构造。
 public class Sample {
 
     private final SampleDatabase db;

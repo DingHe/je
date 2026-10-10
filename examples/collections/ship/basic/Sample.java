@@ -36,6 +36,8 @@ import com.sleepycat.je.DatabaseException;
  *
  * @author Mark Hayes
  */
+// collections.ship.basic 是 Berkeley DB Java Edition 示例中的一个供应商—零件—供货关系数据库，
+// 用来演示如何通过 Java Collections API 操作底层 Berkeley DB，而不是直接使用游标 API 完成所有读写。官方文档把它归入 JE Collections API 的 Shipments 示例
 public class Sample {
 
     private final SampleDatabase db;

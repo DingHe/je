@@ -25,15 +25,23 @@ import com.sleepycat.collections.StoredMap;
  *
  * @author Mark Hayes
  */
+// SampleViews 是 Berkeley DB Java Edition (JE) 官方提供的供应链示例程序（collections.ship.basic 包）中的视图与绑定转换管理类。
+// 核心作用体现在：
+// 定义数据绑定（Data Bindings）：利用 SerialBinding 结合 ClassCatalog，将底层 Berkeley DB 的二进制字节流与领域模型对象（如零件、供应商、发货记录的 Key 和 Data 对象）进行双向序列化与反序列化转换。
+// 构建 Java 集合映射视图（Collection Views）：将 SampleDatabase 中打开的各个底层 Database 包装成标准的 Java 集合类型（StoredMap），使得开发者能够完全通过操作标准 Java 内存 Map 的方式来对底层磁盘数据库进行增删改查。
+// 提供便捷的视图访问接口：集中管理所有的 StoredMap 和 StoredEntrySet 视图，避免在其他业务类中重复编写绑定和转换逻辑。
 public class SampleViews {
-
+    // 零件（Part）数据的集合映射视图。它将底层的 partDb 数据库与 PartKey / PartData 对象的序列化绑定关联起来，提供键值对形式的零件数据访问。
     private StoredMap partMap;
+    // 供应商（Supplier）数据的集合映射视图。它将底层的 supplierDb 数据库与 SupplierKey / SupplierData 对象的序列化绑定关联起来。
     private StoredMap supplierMap;
+    // 发货（Shipment）数据的集合映射视图。它将底层的 shipmentDb 数据库与 ShipmentKey / ShipmentData 对象的序列化绑定关联起来。
     private StoredMap shipmentMap;
 
     /**
      * Create the data bindings and collection views.
      */
+    // 负责为各类业务对象创建对应的 SerialBinding（序列化绑定器），并基于底层的 Database 构建 StoredMap 映射视图。
     public SampleViews(SampleDatabase db) {
 
         // In this sample, the stored key and data entries are used directly

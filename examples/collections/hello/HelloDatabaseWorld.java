@@ -33,16 +33,26 @@ import com.sleepycat.je.EnvironmentConfig;
 /**
  * @author Mark Hayes
  */
+// 提供的入门级集合示例程序
+// 核心作用体现在：
+// 演示 Java 集合框架与 Berkeley DB 的集成：展示如何使用 StoredSortedMap（将底层的 Berkeley DB 映射为标准的 Java SortedMap），并配合 Tuple（元组）绑定 和 Serial（序列化）绑定 来存储非简单的类型（如 Integer 作为键、String 作为值）。
+// 类目录（ClassCatalog）的使用：演示当需要存储复杂对象或 Java 序列化对象时，如何通过独立的 ClassCatalog 数据库来管理对象的类定义信息。
+// 事务性工作单元模式（TransactionWorker）：该类实现了 TransactionWorker 接口，展示了如何通过 TransactionRunner 干净、规范地在事务边界内执行数据库操作。
 public class HelloDatabaseWorld implements TransactionWorker {
-
+    // 用作要写入数据库的文本数据源（分别对应索引 0、1、2）。
     private static final String[] INT_NAMES = {
         "Hello", "Database", "World",
     };
+    // 控制标志。指示在创建环境或数据库时，如果它们不存在，是否允许自动创建。默认为 true。
     private static boolean create = true;
-
+    // Berkeley DB 的环境（Environment）实例对象，管理当前应用目录下的数据库文件及缓存。
     private Environment env;
+    // 类目录实例。在使用 Java 序列化绑定（SerialBinding）时，JE 需要一个 ClassCatalog 来记录和存储序列化对象的类元数据结构。
     private ClassCatalog catalog;
+    //Berkeley DB 数据库实例，代表名为 "helloworld" 的实际数据存储文件。
     private Database db;
+    // 基于 Java SortedMap 接口的数据库映射视图（由 StoredSortedMap 实现）。
+    // 将 Key（Integer）和 Value（String）自动转换为底层字节存储，使开发者能像操作标准 Java 内存 Map 一样操作磁盘数据库。
     private SortedMap<Integer, String> map;
 
     /** Creates the environment and runs a transaction */
