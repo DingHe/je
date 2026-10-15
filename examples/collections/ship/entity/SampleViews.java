@@ -26,18 +26,29 @@ import com.sleepycat.collections.StoredValueSet;
  *
  * @author Mark Hayes
  */
+// SampleViews 是 Berkeley DB Java Edition (JE) 官方提供的供应链实体示例程序（collections.ship.entity 包）中的视图与实体绑定管理类。
+// 与基础模块的 SampleViews 相比，该版本的核心增强在于：引入了实体绑定（Entity Bindings，即 EntityBinding / SerialSerialBinding）。
+// 主要核心作用体现在：
+// 实现底层键值对与高层组合实体的双向转换：通过自定义的 PartBinding、SupplierBinding 和 ShipmentBinding，将底层分离存储的 Key（如 PartKey）与 Data（如 PartData）无缝聚合成统一的业务实体对象（如 Part），从而更符合面向对象的开发习惯。
+// 构建全面的集合映射与值集视图：为所有主表（零件、供应商、发货）以及二级索引表（按零件、按供应商、按城市）统一构建了 StoredSortedMap 映射视图，并提供了便捷的 StoredValueSet（实体集）访问方法。
 public class SampleViews {
-
+    // 零件（Part）主表的有序映射视图。键为 PartKey，值为组合实体 Part。
     private StoredSortedMap partMap;
+    // 供应商（Supplier）主表的有序映射视图。键为 SupplierKey，值为组合实体 Supplier。
     private StoredSortedMap supplierMap;
+    // 发货（Shipment）主表的有序映射视图。键为 ShipmentKey，值为组合实体 Shipment。
     private StoredSortedMap shipmentMap;
+    // “发货按零件”二级索引的有序映射视图。键为 PartKey，值为发货实体 Shipment。
     private StoredSortedMap shipmentByPartMap;
+    // “发货按供应商”二级索引的有序映射视图。键为 SupplierKey，值为发货实体 Shipment。
     private StoredSortedMap shipmentBySupplierMap;
+    // “供应商按城市”二级索引的有序映射视图。键为城市字符串（String），值为供应商实体 Supplier。
     private StoredSortedMap supplierByCityMap;
 
     /**
      * Create the data bindings and collection views.
      */
+    // 负责创建所有的序列化绑定器（SerialBinding）与实体绑定器（EntityBinding），并基于底层的数据库和索引初始化对应的 StoredSortedMap 视图。
     public SampleViews(SampleDatabase db) {
 
         // Create the data bindings.
@@ -47,6 +58,8 @@ public class SampleViews {
         // special binding class is needed.
         //
         ClassCatalog catalog = db.getClassCatalog();
+        // 实例化各个键的序列化绑定：partKeyBinding、supplierKeyBinding、shipmentKeyBinding 以及城市键的 cityKeyBinding
+        // 实例化三个组合实体绑定器：partDataBinding（使用 PartBinding）、supplierDataBinding（使用 SupplierBinding）、shipmentDataBinding（使用 ShipmentBinding）。
         SerialBinding partKeyBinding =
             new SerialBinding(catalog, PartKey.class);
         EntityBinding partDataBinding =
@@ -68,7 +81,7 @@ public class SampleViews {
         // StoredSortedMap is not used since the stores and indices are
         // ordered by serialized key objects, which do not provide a very
         // useful ordering.
-        //
+        // 依次创建六个 StoredSortedMap 实例，将底层主表与二级索引分别与对应的绑定器关联（最后一个参数设为 true 表示支持通过 Map 修改数据）。
         partMap =
             new StoredSortedMap(db.getPartDatabase(),
                                 partKeyBinding, partDataBinding, true);

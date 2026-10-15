@@ -37,6 +37,10 @@ import com.sleepycat.je.DatabaseException;
  *
  * @author Mark Hayes
  */
+// 在 Berkeley DB Java Edition（JE）7.5 的 examples/collections.ship.marshal 包中，核心是演示 如何让业务实体自己负责数据的序列化与反序列化，并通过 Collections API 将实体映射到 JE 数据库。
+// 重点放在三个问题上：
+// 业务对象如何转换成数据库 Key 和 Data？
+// JE 如何把业务对象存进数据库，再还原成 Java 对象？
 public class Sample {
 
     private final SampleDatabase db;

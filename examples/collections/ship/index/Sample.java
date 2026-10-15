@@ -36,6 +36,7 @@ import com.sleepycat.je.DatabaseException;
  *
  * @author Mark Hayes
  */
+// collections.ship.index 属于 JE Examples 中的 Shipments 示例系列。它与前面分析的 basic、entity、factory 使用相同的供应商、零件、供货关系业务模型，但重点转向 如何使用二级索引（Secondary Index）访问和查询数据库记录。
 public class Sample {
 
     private final SampleDatabase db;

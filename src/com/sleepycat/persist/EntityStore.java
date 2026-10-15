@@ -146,12 +146,17 @@ import com.sleepycat.persist.model.SecondaryKey;
  *
  * @author Mark Hayes
  */
+// EntityStore 是 Berkeley DB Java Edition (JE) 直接持久层（Direct Persistence Layer, DPL）中的核心类。
+// 主要核心作用体现在：
+// 面向对象的持久化管理：它提供了一个高层次的、类型安全的、面向对象的持久化存储容器。通过 @Entity、@PrimaryKey、@SecondaryKey 等注解，开发者可以直接操作 Java 对象（实体类），而无需手动处理底层的字节数组转换（Bindings）。
+// 多索引与关系维护：自动为每个实体类创建主索引（PrimaryIndex），并为所有的二级键自动创建和管理二级索引（SecondaryIndex）。
+// 线程安全与生命周期管理：EntityStore 是线程安全的，多个线程可以安全地共享同一个 EntityStore 实例。它还实现了 Closeable 接口，负责管理底层数据库、序列（Sequence）以及 DPL 元数据缓存的生命周期。
 public class EntityStore
     /* <!-- begin JE only --> */
     implements Closeable
     /* <!-- end JE only --> */
     {
-
+    // 底层真正的存储实现引擎（com.sleepycat.persist.impl.Store）。EntityStore 的绝大部分公开方法在内部都是直接委派（Delegate）给这个 store 对象来完成具体执行的。
     private Store store;
 
     /**
@@ -195,6 +200,9 @@ public class EntityStore
      *
      * @throws DatabaseException the base class for all BDB exceptions.
      */
+    // 在给定的 Berkeley DB 环境（Environment）中打开或创建一个实体存储（Entity Store）。
+    // storeName：实体存储的名称（允许为空字符串 ""）。在同一个环境中可以通过不同的名称区分多套同名实体类的持久化数据。
+    // config：实体存储的配置对象（StoreConfig），若为 null 则使用默认配置。
     public EntityStore(Environment env, String storeName, StoreConfig config)
         throws StoreExistsException,
                StoreNotFoundException,
@@ -247,6 +255,7 @@ public class EntityStore
      *
      * @throws DatabaseException the base class for all BDB exceptions.
      */
+    // 获取指定 Berkeley DB 环境中所有已存在的实体存储名称集合。
     public static Set<String> getStoreNames(Environment env)
         throws DatabaseException {
 
@@ -259,6 +268,7 @@ public class EntityStore
      * @hidden
      * For internal use only.
      */
+    // 用于判断当前高可用复制环境是否处于副本升级模式。
     public boolean isReplicaUpgradeMode() {
         return store.isReplicaUpgradeMode();
     }
@@ -271,6 +281,7 @@ public class EntityStore
      *
      * @return the model.
      */
+    // 获取当前实体存储的数据模型（EntityModel）。
     public EntityModel getModel() {
         return store.getModel();
     }
@@ -282,6 +293,7 @@ public class EntityStore
      *
      * @return the mutations.
      */
+    // 获取在打开存储时配置的类演化变异规则集（Mutations）
     public Mutations getMutations() {
         return store.getMutations();
     }
@@ -330,6 +342,8 @@ public class EntityStore
      *
      * @throws DatabaseException the base class for all BDB exceptions.
      */
+    // 获取指定实体类的主索引（Primary Index），如果尚未打开则在内部自动创建并打开。
+    // 传入主键的类型（primaryKeyClass）和实体类的类型（entityClass）。
     public <PK, E> PrimaryIndex<PK, E>
         getPrimaryIndex(Class<PK> primaryKeyClass, Class<E> entityClass)
         throws DatabaseException {
@@ -402,6 +416,8 @@ public class EntityStore
      *
      * @throws DatabaseException the base class for all BDB exceptions.
      */
+    // 获取指定主索引对应的二级索引（Secondary Index），如果尚未打开则自动打开。
+    // 传入主索引对象、二级键类型（keyClass）以及二级键的名称（keyName）。
     public <SK, PK, E> SecondaryIndex<SK, PK, E>
         getSecondaryIndex(PrimaryIndex<PK, E> primaryIndex,
                           Class<SK> keyClass,
@@ -481,6 +497,7 @@ public class EntityStore
      *
      * @throws DatabaseException the base class for all BDB exceptions.
      */
+    // 获取定义在实体子类中的二级索引，如果尚未打开则自动打开。
     public <SK, PK, E1, E2 extends E1> SecondaryIndex<SK, PK, E2>
         getSubclassIndex(PrimaryIndex<PK, E1> primaryIndex,
                          Class<E2> entitySubclass,

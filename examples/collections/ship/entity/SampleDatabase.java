@@ -33,34 +33,54 @@ import com.sleepycat.je.SecondaryDatabase;
  *
  * @author Mark Hayes
  */
+// SampleDatabase 是 Berkeley DB Java Edition (JE) 官方提供的供应链实体示例程序（collections.ship.entity 包）中的核心基础设施类。
+// 与之前基础模块的 SampleDatabase 相比，该版本的最大不同与核心增强在于：引入了二级索引（Secondary Databases）与外键约束（Foreign Key Constraints）机制。
+// 主要核心作用体现在：
+// 集中管理主存储表与索引：不仅初始化了核心的零件表、供应商表、发货表和类目录，还额外创建了三个二级索引表：供应商按城市索引、发货按零件索引、发货按供应商索引。
+// 定义外键关系与级联删除：通过 SecondaryConfig 配置了外键约束，确保发货记录（Shipment）引用的零件或供应商必须存在；同时配置了级联删除（CASCADE），当主表中的零件或供应商被删除时，关联的发货记录会自动被删除。
+// 自定义键提取器（Key Creators）：内置了三个静态内部类，用于从序列化的主键/值中动态提取二级索引键。
 public class SampleDatabase {
-
+    // 类目录（Class Catalog）数据库的存储名称，用于保存序列化对象的类元数据。
     private static final String CLASS_CATALOG = "java_class_catalog";
+    // 供应商（Supplier）主数据表的名字。
     private static final String SUPPLIER_STORE = "supplier_store";
+    // 零件（Part）主数据表的名字。
     private static final String PART_STORE = "part_store";
+    // 发货（Shipment）主数据表的名字。
     private static final String SHIPMENT_STORE = "shipment_store";
+    // 发货表按零件关联的二级索引表名字。
     private static final String SHIPMENT_PART_INDEX = "shipment_part_index";
+    // 发货表按供应商关联的二级索引表名字。
     private static final String SHIPMENT_SUPPLIER_INDEX =
         "shipment_supplier_index";
+    // 供应商按城市分类的二级索引表名字。
     private static final String SUPPLIER_CITY_INDEX = "supplier_city_index";
-
+    // Berkeley DB 环境实例，统一管理目录下的所有底层文件与缓存。
     private Environment env;
+    // 零件主表的 Database 实例。
     private Database partDb;
+    // 供应商主表的 Database 实例。
     private Database supplierDb;
+    // 发货主表的 Database 实例。
     private Database shipmentDb;
+    // 供应商按城市分类的二级索引数据库实例。
     private SecondaryDatabase supplierByCityDb;
+    // 发货按零件分类的二级索引数据库实例。
     private SecondaryDatabase shipmentByPartDb;
+    // 发货按供应商分类的二级索引数据库实例。
     private SecondaryDatabase shipmentBySupplierDb;
+    // 类目录实例，为序列化绑定提供类结构支持。
     private StoredClassCatalog javaCatalog;
 
     /**
      * Open all storage containers, indices, and catalogs.
      */
+    // 负责初始化 Berkeley DB 环境、打开类目录、创建三个主数据表，并配置外键与二级索引后打开对应的 SecondaryDatabase。
     public SampleDatabase(String homeDirectory)
         throws DatabaseException {
 
         // Open the Berkeley DB environment in transactional mode.
-        //
+        // 创建 EnvironmentConfig，开启事务支持与自动创建，在指定目录加载 Environment。
         System.out.println("Opening environment in: " + homeDirectory);
         EnvironmentConfig envConfig = new EnvironmentConfig();
         envConfig.setTransactional(true);
@@ -68,7 +88,7 @@ public class SampleDatabase {
         env = new Environment(new File(homeDirectory), envConfig);
 
         // Set the Berkeley DB config for opening all stores.
-        //
+        // 初始化主表：创建通用的 DatabaseConfig（支持事务和自动创建），依次打开 partDb、supplierDb 和 shipmentDb。
         DatabaseConfig dbConfig = new DatabaseConfig();
         dbConfig.setTransactional(true);
         dbConfig.setAllowCreate(true);
@@ -97,12 +117,14 @@ public class SampleDatabase {
         // existing part and supplier keys.  The CASCADE delete action means
         // that shipments will be deleted if their associated part or supplier
         // is deleted.
-        //
+        // 配置并打开二级索引（核心逻辑）：
         SecondaryConfig secConfig = new SecondaryConfig();
         secConfig.setTransactional(true);
         secConfig.setAllowCreate(true);
+        // 设置允许排序重复键（setSortedDuplicates(true)）
+        // 因为一个城市可能有多个供应商，一个供应商或零件也可能有多个发货记录。
         secConfig.setSortedDuplicates(true);
-
+        // 1. 供应商按城市索引：通过 SupplierByCityKeyCreator 从 SupplierData 中提取 city 作为二级索引键，打开 supplierByCityDb。
         secConfig.setKeyCreator(
             new SupplierByCityKeyCreator(javaCatalog,
                                          SupplierKey.class,
@@ -110,7 +132,7 @@ public class SampleDatabase {
                                          String.class));
         supplierByCityDb = env.openSecondaryDatabase(null, SUPPLIER_CITY_INDEX,
                                                      supplierDb, secConfig);
-
+        // 2. 发货按零件索引：将外键库关联到 partDb，设置级联删除（ForeignKeyDeleteAction.CASCADE），通过 ShipmentByPartKeyCreator 从 ShipmentKey 中提取零件编号作为索引键，打开 shipmentByPartDb。
         secConfig.setForeignKeyDatabase(partDb);
         secConfig.setForeignKeyDeleteAction(ForeignKeyDeleteAction.CASCADE);
         secConfig.setKeyCreator(
@@ -120,7 +142,7 @@ public class SampleDatabase {
                                          PartKey.class));
         shipmentByPartDb = env.openSecondaryDatabase(null, SHIPMENT_PART_INDEX,
                                                      shipmentDb, secConfig);
-
+        // 3. 发货按供应商索引：将外键库关联到 supplierDb，同样设置级联删除，通过 ShipmentBySupplierKeyCreator 从 ShipmentKey 中提取供应商编号作为索引键，打开 shipmentBySupplierDb。
         secConfig.setForeignKeyDatabase(supplierDb);
         secConfig.setForeignKeyDeleteAction(ForeignKeyDeleteAction.CASCADE);
         secConfig.setKeyCreator(
@@ -221,6 +243,7 @@ public class SampleDatabase {
      * SecondaryKeyCreator for the case where the data keys and value are all
      * of the serial format.
      */
+    // 用于 SupplierByCity 索引的键提取器。
     private static class SupplierByCityKeyCreator
         extends SerialSerialKeyCreator {
 
@@ -243,6 +266,7 @@ public class SampleDatabase {
          * Extract the city key from a supplier key/value pair.  The city key
          * is stored in the supplier value, so the supplier key is not used.
          */
+        // 从供应商的 Value（即 SupplierData）中提取出城市名称（String）作为二级索引的键返回（在此场景下不使用主键）。
         public Object createSecondaryKey(Object primaryKeyInput,
                                          Object valueInput) {
 

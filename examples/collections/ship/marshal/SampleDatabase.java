@@ -35,6 +35,11 @@ import com.sleepycat.je.SecondaryDatabase;
  *
  * @author Mark Hayes
  */
+// 该版本的核心特征与增强在于：引入了 MarshalledEntity（封送实体接口）与 TupleSerialKeyCreator 机制。
+// 主要核心作用体现在：
+// 支持元组-序列化混合格式的二级索引：该模块的底层主键采用元组（Tuple）格式，而数据采用序列化（Serial）格式。
+// 统一的键提取器（MarshalledKeyCreator）：通过自定义的内部类 MarshalledKeyCreator 继承自 TupleSerialKeyCreator，利用统一的接口方法来动态反序列化主键并提取二级索引键，从而极大地简化了多表、多索引的键抽取逻辑。
+// 管理主表、索引与级联删除：同样负责初始化零件、供应商、发货三大主表，以及对应的三个二级索引，并配置了外键约束和 CASCADE 级联删除。
 public class SampleDatabase {
 
     private static final String CLASS_CATALOG = "java_class_catalog";
@@ -62,7 +67,7 @@ public class SampleDatabase {
         throws DatabaseException {
 
         // Open the Berkeley DB environment in transactional mode.
-        //
+        // 创建 EnvironmentConfig，开启事务支持与自动创建，加载 Environment。
         System.out.println("Opening environment in: " + homeDirectory);
         EnvironmentConfig envConfig = new EnvironmentConfig();
         envConfig.setTransactional(true);
@@ -70,20 +75,20 @@ public class SampleDatabase {
         env = new Environment(new File(homeDirectory), envConfig);
 
         // Set the Berkeley DB config for opening all stores.
-        //
+        // 创建 DatabaseConfig，开启事务支持与自动创建。
         DatabaseConfig dbConfig = new DatabaseConfig();
         dbConfig.setTransactional(true);
         dbConfig.setAllowCreate(true);
 
         // Create the Serial class catalog.  This holds the serialized class
         // format for all database records of serial format.
-        //
+        // 打开 catalogDb 并初始化 javaCatalog
         Database catalogDb = env.openDatabase(null, CLASS_CATALOG, dbConfig);
         javaCatalog = new StoredClassCatalog(catalogDb);
 
         // Open the Berkeley DB database for the part, supplier and shipment
         // stores.  The stores are opened with no duplicate keys allowed.
-        //
+        // 依次打开 partDb、supplierDb 和 shipmentDb
         partDb = env.openDatabase(null, PART_STORE, dbConfig);
 
         supplierDb = env.openDatabase(null, SUPPLIER_STORE, dbConfig);
@@ -99,18 +104,18 @@ public class SampleDatabase {
         // existing part and supplier keys.  The CASCADE delete action means
         // that shipments will be deleted if their associated part or supplier
         // is deleted.
-        //
+        // 配置并打开二级索引（核心逻辑）
         SecondaryConfig secConfig = new SecondaryConfig();
         secConfig.setTransactional(true);
         secConfig.setAllowCreate(true);
         secConfig.setSortedDuplicates(true);
-
+        // 1. 供应商按城市索引：通过 new MarshalledKeyCreator(javaCatalog, Supplier.class, Supplier.CITY_KEY) 创建键提取器，打开 supplierByCityDb。
         secConfig.setKeyCreator(new MarshalledKeyCreator(javaCatalog,
                                                          Supplier.class,
                                                          Supplier.CITY_KEY));
         supplierByCityDb = env.openSecondaryDatabase(null, SUPPLIER_CITY_INDEX,
                                                      supplierDb, secConfig);
-
+        // 2. 发货按零件索引：设置外键关联到 partDb、级联删除动作为 CASCADE，通过 MarshalledKeyCreator 提取零件编号索引键，打开 shipmentByPartDb。
         secConfig.setForeignKeyDatabase(partDb);
         secConfig.setForeignKeyDeleteAction(ForeignKeyDeleteAction.CASCADE);
         secConfig.setKeyCreator(new MarshalledKeyCreator(javaCatalog,
@@ -118,7 +123,7 @@ public class SampleDatabase {
                                                          Shipment.PART_KEY));
         shipmentByPartDb = env.openSecondaryDatabase(null, SHIPMENT_PART_INDEX,
                                                      shipmentDb, secConfig);
-
+        // 3. 发货按供应商索引：设置外键关联到 supplierDb、级联删除动作为 CASCADE，通过 MarshalledKeyCreator 提取供应商编号索引键，打开 shipmentBySupplierDb。
         secConfig.setForeignKeyDatabase(supplierDb);
         secConfig.setForeignKeyDeleteAction(ForeignKeyDeleteAction.CASCADE);
         secConfig.setKeyCreator(new MarshalledKeyCreator(javaCatalog,
@@ -217,6 +222,7 @@ public class SampleDatabase {
      * SecondaryKeyCreator for the case where the data keys are of the format
      * TupleFormat and the data values are of the format SerialFormat.
      */
+    // 通用的二级索引键提取器。继承自 TupleSerialKeyCreator（适用于键为 Tuple 格式、值为 Serial 格式的场景），通过泛型化和接口回调机制，避免为每个索引编写单独的 KeyCreator。
     private static class MarshalledKeyCreator
         extends TupleSerialKeyCreator {
 

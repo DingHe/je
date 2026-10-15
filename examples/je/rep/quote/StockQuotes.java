@@ -188,21 +188,33 @@ import com.sleepycat.persist.EntityStore;
  * requests externally to the master and provide primitive load balancing
  * across the nodes in the replication group.
  */
+// StockQuotes 是 Berkeley DB Java Edition (JE) 高可用性（High Availability / HA）复制模块中的最基础复制应用演示程序。
+// 核心作用体现在：
+// 演示复制环境（ReplicatedEnvironment）的创建与生命周期管理：展示如何通过 ReplicatedEnvironment、ReplicationConfig 和 EnvironmentConfig 搭建一个主从复制（Master-Replica）集群。
+// 演示分布式读写事务：提供控制台交互界面，允许用户在 Master 节点上执行写入操作（更新股票价格，写操作在 Replica 上会被拒绝并抛出 ReplicaWriteException），并在所有节点（Master 或 Replica）上执行读取和打印操作。
+// 高可用异常处理与自愈：演示了处理复制集群中常见的异常（如选举超时、日志不一致 InsufficientLogException 触发的网络恢复 NetworkRestore、回滚异常 RollbackException 等）。
 public class StockQuotes {
+    // 定义持久化实体存储（Entity Store）中使用的仓库名称（库名为 "Quotes"）。
     private static final String STORE_NAME = "Quotes";
 
     /* The name of the replication group used by this application. */
+    // 定义该复制应用程序所属的复制组（Replication Group）全局唯一名称。
     static final String REP_GROUP_NAME = "StockQuotesRepGroup";
-
+    // 静态的数据访问对象（Data Access Object），封装了对实体存储中数据的读写操作。
     static DataAccessor dao = null;
+    // 静态的实体存储（Entity Store）句柄，用于管理高层 Java 对象的持久化。
     static EntityStore store = null;
+    // 当前复制节点在本地磁盘上的环境根目录路径（File 对象）。
     private File envHome;
+    // 标准数据库环境的配置对象，包含事务开关、持久性策略（Durability）及是否允许自动创建等。
     EnvironmentConfig envConfig;
-
+    // 复制专用的配置对象（ReplicationConfig），用于设定节点名称、网络主机端口、群组名称、辅助节点（Helper Host）、复制一致性策略及 ACK 超时时间等。
     final ReplicationConfig repConfig;
+    // 复制环境的句柄（ReplicatedEnvironment）。它是管理高可用节点状态（Master/Replica）的核心对象。
     ReplicatedEnvironment repEnv;
 
     /* The maximum number of times to retry handle creation. */
+    // 在初始化获取复制环境句柄时，若遇到选主失败等问题允许重试的最大次数（默认为 5 次）。
     private static int REP_HANDLE_RETRY_MAX = 5;
 
     /**
@@ -292,6 +304,7 @@ public class StockQuotes {
      *
      * @throws InterruptedException
      */
+    // 以只读事务的方式遍历并打印存储在 Berkeley DB 数据库中的所有股票信息（包括股票代号与最新交易价），并且无论当前节点是主节点（Master）还是副本节点（Replica）都可以调用执行。
     private void printStocks(final PrintStream out)
         throws InterruptedException {
 
@@ -429,16 +442,23 @@ public class StockQuotes {
          * specified in the je.properties file, as is shown in the properties
          * file included in the example.
          */
+        // 创建一个默认的复制配置对象。
+        // 该对象用于保存当前节点在高可用复制集群中的身份、网络端口、群组名称及同步策略。
         repConfig = new ReplicationConfig();
 
         /* Set consistency policy for replica. */
+        // 为 Replica（副本）节点设置时间一致性策略（TimeConsistencyPolicy）
+        // 1, TimeUnit.SECONDS：允许副本节点的数据最多落后主节点（Master） 1 秒钟。
+        // 3, TimeUnit.SECONDS：如果副本节点落后超过 1 秒，它会在读取时最多等待 3 秒钟，等待其追赶上主节点的数据进度再返回结果。
         TimeConsistencyPolicy consistencyPolicy = new TimeConsistencyPolicy
             (1, TimeUnit.SECONDS, /* 1 sec of lag */
              3, TimeUnit.SECONDS  /* Wait up to 3 sec */);
         repConfig.setConsistencyPolicy(consistencyPolicy);
 
         /* Wait up to two seconds for commit acknowledgments. */
+        // 设置主节点等待副本节点确认（Ack）写入操作的超时时间为 2 秒。如果在规定时间内没有收到多数派副本的写入确认，主节点会认为复制超时并报错。
         repConfig.setReplicaAckTimeout(2, TimeUnit.SECONDS);
+        // 调用解析方法，读取并设置用户在控制台启动时传入的命令行参数（如 -env、-nodeName、-nodeHost、-helperHost 等）
         parseParams(params);
 
         /*
@@ -449,12 +469,15 @@ public class StockQuotes {
          * in the default read/write mode. All write operations will be
          * refused on the client though.
          */
+        // 创建一个标准的数据库环境配置对象，用来控制本地底层存储行为。
         envConfig = new EnvironmentConfig();
+        // 必须开启事务支持。在 Berkeley DB JE 的高可用复制环境中，所有操作都必须运行在事务模式下。
         envConfig.setTransactional(true);
+        // 设置群组的持久性策略（Durability），决定数据落盘和主备同步的安全性与性能平衡。
         Durability durability =
-            new Durability(Durability.SyncPolicy.WRITE_NO_SYNC,
-                           Durability.SyncPolicy.WRITE_NO_SYNC,
-                           Durability.ReplicaAckPolicy.SIMPLE_MAJORITY);
+            new Durability(Durability.SyncPolicy.WRITE_NO_SYNC, // Master 刷盘策略 (WRITE_NO_SYNC)：主节点提交事务时将日志写入操作系统缓存，但不强制立即刷入物理磁盘（提高性能，降低断电丢失风险）。
+                           Durability.SyncPolicy.WRITE_NO_SYNC, // Replica 刷盘策略 (WRITE_NO_SYNC)：副本节点接收到日志后同样写入缓存而不强制立即物理刷盘。
+                           Durability.ReplicaAckPolicy.SIMPLE_MAJORITY); // Ack 确认策略 (SIMPLE_MAJORITY)：主节点提交事务时，必须获得复制群组中简单多数派（Simple Majority，即过半数节点）的成功确认后，事务才算真正提交成功。
         envConfig.setDurability(durability);
         envConfig.setAllowCreate(true);
     }
@@ -467,10 +490,13 @@ public class StockQuotes {
      *
      * @throws InterruptedException
      */
+    // 负责在应用首次启动（或因异常需要恢复/重建环境）时，依次初始化复制环境句柄（ReplicatedEnvironment）、高层实体仓库（EntityStore）以及数据访问对象（DataAccessor）。
     void initialize()
         throws InterruptedException {
 
         /* Initialize the replication handle. */
+        // 调用 getEnvironment() 方法创建或获取底层的 ReplicatedEnvironment（高可用复制环境句柄）。
+        // 如果当前节点尚未成功加入集群或尚未选出 Master，该方法内部会触发重试逻辑，确保成功建立集群连接。
         repEnv = getEnvironment();
 
         /*
@@ -481,6 +507,7 @@ public class StockQuotes {
          * could be defined, but for simplicity the RunTransaction class is
          * used here and the txn parameter is simply ignored.
          */
+        // 通过自封装的 RunTransaction 辅助类，在复制环境中安全地打开名为 "Quotes" 的 EntityStore（实体存储仓库）
         new RunTransaction(repEnv, System.out) {
 
             @Override
@@ -497,7 +524,7 @@ public class StockQuotes {
                 throw lastException;
             }
         }.run(false /*readOnly*/);
-
+        // 基于刚刚成功打开的 store 实例，实例化高层的 DataAccessor（数据访问对象）。
         new RunTransaction(repEnv, System.out) {
 
             @Override
@@ -535,6 +562,8 @@ public class StockQuotes {
      *
      * @throws InterruptedException if the operation was interrupted
      */
+    // 高可用复制应用中建立集群连接、创建复制环境句柄的核心方法
+    // 负责实例化并返回一个 ReplicatedEnvironment（高可用复制环境句柄），并在遇到群组选主失败（如存活节点不足、网络不通等）时提供自动重试机制。
     ReplicatedEnvironment getEnvironment()
         throws InterruptedException {
 
@@ -544,6 +573,7 @@ public class StockQuotes {
          * In this example we retry REP_HANDLE_RETRY_MAX times, but a
          * production HA application may retry indefinitely.
          */
+        // 循环重试机制的设计意图
         for (int i = 0; i < REP_HANDLE_RETRY_MAX; i++) {
             try {
                 return new ReplicatedEnvironment(envHome,
@@ -592,13 +622,14 @@ public class StockQuotes {
         String nodeHost = null;
         while (argc < nArgs) {
             String thisArg = argv[argc++];
-
+            // -env：设置环境变量目录 envHome。
             if (thisArg.equals("-env")) {
                 if (argc < nArgs) {
                     envHome = new File(argv[argc++]);
                 } else {
                     usage("-env requires an argument");
                 }
+            // -nodeName：设置当前节点的唯一名称，并通过 repConfig.setNodeName(...) 绑定。
             } else if (thisArg.equals("-nodeName"))  {
                 /* the node name */
                 if (argc < nArgs) {
@@ -607,6 +638,7 @@ public class StockQuotes {
                 } else {
                     usage("-nodeName requires an argument");
                 }
+            // -nodeHost：设置当前节点的 IP 和端口，通过 repConfig.setNodeHostPort(...) 绑定。
             }  else if (thisArg.equals("-nodeHost")) {
                 /* The node hostname, port pair. */
                 nodeHost = argv[argc++];
@@ -615,6 +647,7 @@ public class StockQuotes {
                 } else {
                     usage("-nodeHost requires an argument");
                 }
+            // -helperHost：设置辅助节点的 IP 和端口，通过 repConfig.setHelperHosts(...) 绑定。
             } else if (thisArg.equals("-helperHost")) {
                 /* The helper node hostname, port pair. */
                 if (argc < nArgs) {
@@ -639,6 +672,7 @@ public class StockQuotes {
         }
 
         /* Helper host can be skipped once a anode has joined a group. */
+        // 设置固定的复制群组名称 REP_GROUP_NAME。
         repConfig.setGroupName(REP_GROUP_NAME);
     }
 

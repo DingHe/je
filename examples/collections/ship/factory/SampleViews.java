@@ -23,6 +23,11 @@ import com.sleepycat.collections.TupleSerialFactory;
  *
  * @author Mark Hayes
  */
+// SampleViews 是 Berkeley DB Java Edition (JE) 官方提供的工厂模式示例程序（collections.ship.factory 包）中的视图管理类。
+// 与前几个模块（basic 和 entity）相比，该版本的最大不同与核心简化在于：借助了 TupleSerialFactory（工厂机制）。
+// 主要核心作用体现在：
+// 极大简化绑定与视图创建：不再需要手动编写冗长的 EntityBinding、SerialBinding 内部类，而是直接通过 TupleSerialFactory.newSortedMap(...) 一行代码自动生成底层绑定并构建有序映射视图（StoredSortedMap）。
+// 集中提供有序映射与有序实体集视图：统一管理所有主表及二级索引的 StoredSortedMap 视图，并提供便捷的 StoredSortedValueSet（有序实体集）方法，方便上层业务代码进行面向对象的查询和遍历。
 public class SampleViews {
 
     private StoredSortedMap partMap;

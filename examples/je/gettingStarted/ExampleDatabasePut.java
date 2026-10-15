@@ -31,17 +31,28 @@ import com.sleepycat.je.DatabaseEntry;
 import com.sleepycat.je.DatabaseException;
 import com.sleepycat.je.Transaction;
 
-public class ExampleDatabasePut {
+// ExampleDatabasePut 是 Berkeley DB Java Edition (JE) 官方入门教程（Getting Started）中的核心示例程序。
+// 主要核心作用体现在：
+// 演示数据加载与写入（Put 操作）：展示如何从纯文本文件（如供应商信息文件、库存信息文件）中读取原始数据，并将其解析、转换为对应的业务对象（如 Vendor、Inventory）。
+// 演示序列化与绑定机制：演示如何使用 SerialBinding 和自定义的 TupleBinding（如 InventoryBinding）将 Java 对象打包成 DatabaseEntry 写入数据库。
+// 演示事务控制与错误处理：展示如何显式开启事务（beginTransaction）、在写入失败时进行事务回滚（txn.abort()）、在成功时提交事务（txn.commit()），以及如何安全地关闭数据库环境。
 
+public class ExampleDatabasePut {
+    // 指定 Berkeley DB 环境（Environment）文件存储的默认本地目录路径。
     private static File myDbEnvPath = new File("/tmp/JEDB");
+    // 指定库存数据源纯文本文件的默认路径。
     private static File inventoryFile = new File("./inventory.txt");
+    // 指定供应商数据源纯文本文件的默认路径。
     private static File vendorsFile = new File("./vendors.txt");
 
     // DatabaseEntries used for loading records
+    // 用于加载记录时的 Key（键）容器（复用同一个 DatabaseEntry 实例以提高性能）。
     private static DatabaseEntry theKey = new DatabaseEntry();
+    // 用于加载记录时的 Data（值）容器（复用同一个 DatabaseEntry 实例）。
     private static DatabaseEntry theData = new DatabaseEntry();
 
     // Encapsulates the environment and databases.
+    // 封装了 Berkeley DB 环境与多个数据库句柄的自定义辅助类实例。
     private static MyDbEnv myDbEnv = new MyDbEnv();
 
     private static void usage() {
@@ -70,8 +81,9 @@ public class ExampleDatabasePut {
     private void run(String args[])
         throws DatabaseException {
         // Parse the arguments list
+        // 解析命令行传入的自定义路径参数
         parseArgs(args);
-
+        // 初始化并打开数据库环境（第二个参数 false 表示环境不是只读的）
         myDbEnv.setup(myDbEnvPath, // path to the environment home
                       false);      // is this environment read-only?
 
@@ -81,7 +93,7 @@ public class ExampleDatabasePut {
         System.out.println("loading inventory db....");
         loadInventoryDb();
     }
-
+    // 负责从供应商文本文件中读取数据，转换为 Vendor 对象，并通过序列化绑定（SerialBinding）写入供应商数据库。
     private void loadVendorsDb()
             throws DatabaseException {
 
@@ -187,12 +199,15 @@ public class ExampleDatabasePut {
         for(int i = 0; i < args.length; ++i) {
             if (args[i].startsWith("-")) {
                 switch(args[i].charAt(1)) {
+                  // -h：将紧跟其后的下一个参数赋值给环境路径 myDbEnvPath。
                   case 'h':
                     myDbEnvPath = new File(args[++i]);
                     break;
+                  // -i：将紧跟其后的下一个参数赋值给库存文件路径 inventoryFile。
                   case 'i':
                     inventoryFile = new File(args[++i]);
                     break;
+                  // -v：将紧跟其后的下一个参数赋值给供应商文件路径 vendorsFile。
                   case 'v':
                     vendorsFile = new File(args[++i]);
                     break;

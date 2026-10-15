@@ -96,34 +96,45 @@ import com.sleepycat.je.rep.monitor.NewMasterEvent;
  *
  * @see RouterDrivenStockQuotes
  */
-
+// HARouter 是 Berkeley DB Java Edition (JE) 高可用（HA）复制模块中的高可用感知路由器（HA-aware Router）示例程序。
+// 核心作用体现在：
+// 独立的独立路由进程：它是一个轻量级的独立客户端应用，不直接访问任何 JE 数据库环境。
+// 利用 Berkeley DB JE 提供的 Monitor（监控器）API 来实时跟踪高可用复制集群的拓扑结构变化（如主备选举、节点加入/离开）。
+// 智能请求分发（读写分离）：接收控制台输入的高层业务请求，如果是写操作（更新股票），则精准路由转发给当前集群的 Master 节点；如果是读操作（打印股票），则在所有活跃的副本节点间进行轮询（Round-Robin）负载均衡分发。
+// 简化节点逻辑：由于路由转发和状态追踪由 HARouter 集中处理，后端的数据节点（如 RouterDrivenStockQuotes）代码变得非常纯粹，只需专注于在专用端口上处理发过来的请求即可。
 public class HARouter {
 
     /*
      * The displacement from the node's port to the app port on which it
      * listens for messages from the router.
      */
+    // 端口偏移量常量（设为 100）。
+    // 用于将 BDB JE 底层复制通信端口（Rep Port）映射为应用程序专用的路由监听端口（App Port = Rep Port + 100）。
     private static final int APP_PORT_DISPLACEMENT = 100;
 
     /*
      * Lock used to coordinate writes to the router's notion of the current
      * master.
      */
+    // 专用于同步和保护“当前 Master 状态信息”的互斥锁对象。
     private final Object masterLock = new Object();
 
     /* Holds the current masterId, protected by masterLock. */
+    // 当前集群 Master 节点的名称（volatile 修饰以保证多线程可见性），由 masterLock 保护。
     private volatile String masterName = null;
 
     /*
      * The address on which the app node that is currently a master is
      * listening for requests, protected by masterLock..
      */
+    // 当前 Master 节点上应用程序监听客户端请求的 Socket 地址，由 masterLock 保护。
     private InetSocketAddress appMasterAddress;
 
     /* 
      * Lock used to coordinate access to nodeAddressMapping, activeAppAddresses 
      * and lastReadAddress.
      */
+    // 专用于同步和保护复制群组拓扑映射（如节点地址映射、活跃节点列表及负载均衡游标）的互斥锁对象。
     private final Object groupLock = new Object();
 
     /*
@@ -131,6 +142,7 @@ public class HARouter {
      * listening for routed requests. All access to these mappings must be 
      * synchronized via groupLock.
      */
+    // 存储所有集群节点名称到其应用程序路由地址（App Socket Address）的映射表。受 groupLock 保护。
     private static final Map<String, InetSocketAddress> nodeAddressMapping =
         new HashMap<String, InetSocketAddress>();
 
@@ -138,6 +150,7 @@ public class HARouter {
      * List of addresses of active nodes. All access to this list must be 
      * synchronized via groupLock.
      */
+    // 当前处于活跃状态的节点应用地址列表，用于实现读请求的轮询分发。受 groupLock 保护。
     private static final List<InetSocketAddress> activeAppAddresses = 
         new LinkedList<InetSocketAddress>();
 
@@ -145,9 +158,11 @@ public class HARouter {
      * Tracks the position in the activeAppAddresses list to which a read 
      * request was last dispatched.
      */
+    // 记录上一次读请求分发到的活跃地址列表索引位置，用于实现 Round-Robin（轮询）负载均衡算法。
     private int lastReadAddress = 0;
 
     /* The configuration for the replication group */
+    // 用于配置 Monitor 监控器节点网络及群组信息的复制配置对象。
     private static final ReplicationConfig repConfig = new ReplicationConfig();
 
     /**
@@ -156,6 +171,7 @@ public class HARouter {
      *
      * @return the next dispatch address
      */
+    // 以轮询（Round-Robin）方式从活跃应用地址列表中获取下一个分发地址，用于读请求的负载均衡。
     private InetSocketAddress getNextDispatchAddress() {
         synchronized (groupLock) {
             lastReadAddress++;
@@ -170,6 +186,7 @@ public class HARouter {
      * Routes a quit request to all the nodes in the replication group, thus
      * shutting them down.
      */
+    // 将退出（quit）请求广播路由给复制群组中的所有节点，促使它们安全关闭。
     private void routeQuit() {
         synchronized (groupLock) {
             for (InetSocketAddress address : nodeAddressMapping.values()) {
@@ -188,6 +205,7 @@ public class HARouter {
      *
      * @param line the text of the read request
      */
+    // 以轮询方式将读请求分发给集群中活跃的节点，如果所有节点均不可用则放弃。
     private void routeReadCommand(String line) {
         IOException lastException = null;
         int retries = 0;
@@ -221,6 +239,7 @@ public class HARouter {
      *
      * @param line the text of the update request.
      */
+    // 将更新/写请求精准路由转发给当前可用的 Master 节点
     private void routeUpdateCommand(String line) {
         final InetSocketAddress targetAddress;
         final String targetNodeName;
@@ -243,6 +262,7 @@ public class HARouter {
      *
      * @throws Exception
      */
+    // 控制台交互主循环。接收用户的输入，根据命令类型分发给对应的路由方法。
     void doWork() throws Exception {
         BufferedReader stdin =
             new BufferedReader(new InputStreamReader(System.in));
@@ -296,19 +316,21 @@ public class HARouter {
      * configuration information about the replication group and the
      * <code>Monitor</code> that is running as part of this Router.
      */
+    // 解析启动路由器时通过命令行传入的各项参数，配置底层的复制与监控属性，并对必填参数进行严格校验。
     void parseParams(String[] argv)
         throws IllegalArgumentException {
 
         int argc = 0;
         int nArgs = argv.length;
-
+        // 首先检查传入的命令行参数数组长度是否为 0，若为空则直接调用 usage(...) 报错并提示必填参数
         if (nArgs == 0) {
             usage("-nodeName, -nodeHost, and -helperHost are required.");
         }
         String nodeName = null;
         while (argc < nArgs) {
             String thisArg = argv[argc++];
-
+            // -nodeName（路由器监控节点名称）
+            // 检查后面是否还有后续参数，若有则取出并赋值给 nodeName，同时通过 repConfig.setNodeName(nodeName) 设置到复制配置中。若缺失参数则报错。
             if (thisArg.equals("-nodeName"))  {
                 /* the node id */
                 if (argc < nArgs) {
@@ -317,6 +339,8 @@ public class HARouter {
                 } else {
                     usage("-nodeName requires an argument");
                 }
+            // -nodeHost（监控器主机与端口对）：
+            // 取出下一个参数，通过 repConfig.setNodeHostPort(...) 设置 Monitor 用于监听选举和群组变动的网络地址。
             }  else if (thisArg.equals("-nodeHost")) {
                 /* The node hostname, port pair. */
                 if (argc < nArgs) {
@@ -324,6 +348,8 @@ public class HARouter {
                 } else {
                     usage("-nodeHost requires an argument");
                 }
+            // -helperHost（辅助节点主机与端口对）：
+            // 取出下一个参数，通过 repConfig.setHelperHosts(...) 设置辅助节点，以便 Monitor 首次启动时能够联系集群并定位 Master。
             } else if (thisArg.equals("-helperHost")) {
                 /* The helper node hostname, port pair. */
                 if (argc < nArgs) {
@@ -335,7 +361,10 @@ public class HARouter {
                 usage("Invalid parameter: " + thisArg);
             }
         }
+        // 将复制节点的类型显式设置为监控器（Monitor）。
+        // 这意味着该路由器虽然属于复制群组的一部分，但它不参与数据的存储和选举投票，其唯一职责是监控主备状态。
         repConfig.setNodeType(NodeType.MONITOR);
+        // 将复制群组名称统一设置为 StockQuotes.REP_GROUP_NAME（"StockQuotesRepGroup"），确保它能够加入正确的股票报价高可用集群。
         repConfig.setGroupName(StockQuotes.REP_GROUP_NAME);
 
         if (nodeName == null) {
@@ -365,21 +394,22 @@ public class HARouter {
          System.exit(0);
      }
 
+     // 实现了 MonitorChangeListener 接口，用于异步接收来自 BDB HA 监控器的集群状态变更事件。
      class RouterChangeListener implements MonitorChangeListener {
-
+         // 当检测到新 Master 当选时，调用 updateMaster(...) 更新主节点信息。
          public void notify(NewMasterEvent newMasterEvent) {
              updateMaster(newMasterEvent.getNodeName(),
                           newMasterEvent.getSocketAddress());
          }
-
+         // 当群组拓扑发生变动（节点加入/移除群组）时，调用 updateGroup(...) 更新成员映射。
          public void notify(GroupChangeEvent groupChangeEvent) {
              updateGroup(groupChangeEvent);
          }
-
+         // 当节点上线加入群组时，调用 addActiveNode(...) 将其加入活跃列表。
          public void notify(JoinGroupEvent joinGroupEvent) {
              addActiveNode(joinGroupEvent);
          }
-
+         // 当节点离线离开群组时，调用 removeActiveNode(...) 将其从活跃列表中移除。
          public void notify(LeaveGroupEvent leaveGroupEvent) {
              removeActiveNode(leaveGroupEvent);
          }
@@ -394,6 +424,7 @@ public class HARouter {
       * @param nodeAddress the socket address for the replication port
       * @return the corresponding socket address used by the application.
       */
+     // 将底层的 BDB 复制端口转换为对应的应用程序路由监听端口。
      static InetSocketAddress getAppSocketAddress(InetSocketAddress
                                                   nodeAddress) {
          return new InetSocketAddress(nodeAddress.getHostName(),
@@ -407,6 +438,7 @@ public class HARouter {
       *
       * @param electableNodes set of electable nodes
       */
+     // 初始化群组中所有可选举节点的地址映射字典。
      private void initGroup(Set<ReplicationNode> electableNodes) {
          System.err.println("Group size: " + electableNodes.size());
          synchronized (groupLock) {
@@ -426,6 +458,7 @@ public class HARouter {
       *
       * @param event the GroupChangeEvent fired
       */
+     // 处理群组变更事件（GroupChangeEvent），动态维护节点地址映射及活跃状态。
      private void updateGroup(GroupChangeEvent event) {
          synchronized (groupLock) {
              ReplicationGroup group = event.getRepGroup();
@@ -459,6 +492,7 @@ public class HARouter {
       *
       * @param event the JoinGroupEvent notifying a node joins the group.
       */
+     // 当节点加入并激活时，将其对应的应用地址添加到活跃分发列表中。
      private void addActiveNode(JoinGroupEvent event) {
          System.err.println("Node: " + event.getNodeName() + 
                             " with current master: " + event.getMasterName() +
@@ -476,6 +510,7 @@ public class HARouter {
       *
       * @param event the LeaveGroupEvent notifying a node leaves the group.
       */
+     // 当节点离开群组时触发的回调包装方法。
      private void removeActiveNode(LeaveGroupEvent event) {
          System.err.println("Node: " + event.getNodeName() + 
                             " with current master: " + event.getMasterName() +
@@ -492,6 +527,7 @@ public class HARouter {
       *
       * @param nodeName name of the node which leaves the group.
       */
+     // 将指定名称的节点从活跃分发地址列表中移除。
      private void removeActiveNode(String nodeName) {
          InetSocketAddress address =
              nodeAddressMapping.get(nodeName);
@@ -504,6 +540,7 @@ public class HARouter {
       * @param newMasterName the new master
       * @param masterNodeAddress the socket address
       */
+     // 更新路由器当前记录的 Master 节点身份与通信地址。
      private void updateMaster(String newMasterName,
                                InetSocketAddress masterNodeAddress){
          System.err.println("Current Master node: " + newMasterName);
@@ -512,7 +549,7 @@ public class HARouter {
              appMasterAddress = getAppSocketAddress(masterNodeAddress);
          }
      }
-
+    // 负责初始化路由器、配置并启动 Monitor 监控器、注册群组监听器，最后进入控制台工作循环。
      public static void main(String[] argv) throws Exception {
          final HARouter router = new HARouter(argv);
 
@@ -523,7 +560,7 @@ public class HARouter {
          monConfig.setHelperHosts(repConfig.getHelperHosts());
 
          final Monitor monitor = new Monitor(monConfig);
-
+         // 计算最大重试次数（默认 5 分钟超时重试）
          final int retrySleepMs = 2000;
          final int retryPeriodMins = 5;
          int maxRetries = (retryPeriodMins*60*1000)/retrySleepMs;
@@ -535,6 +572,7 @@ public class HARouter {
                   * Register this monitor, so it's a member of the replication
                   * group.
                   */
+                 // 注册 Monitor 并获取当前群组的 Master。
                  ReplicationNode master = monitor.register();
 
                  /*
@@ -542,12 +580,15 @@ public class HARouter {
                   * nodes. Once this is accomplished, the Router is kept current
                   * via the Monitor APIs.
                   */
+                 // 获取群组信息
                  ReplicationGroup repGroup = monitor.getGroup();
                  router.initGroup(repGroup.getElectableNodes());
+                 // 初始化主节点
                  router.updateMaster(master.getName(),
                                      master.getSocketAddress());
 
                  /* Start the listener, so it can listen for group changes. */
+                 // 启动后台事件监听线程
                  monitor.startListener(router.new RouterChangeListener());
 
                  break;

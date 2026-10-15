@@ -63,6 +63,7 @@ import je.rep.quote.Command.InvalidCommandException;
  *
  * @see UpdateForwardingStockQuotes
  */
+// 在 Berkeley DB Java Edition（JE）项目中，je.rep.quote 通常是一个演示 JE 高可用复制（Replication）功能的股票报价示例。
 public class SimpleRouter {
 
     /*
