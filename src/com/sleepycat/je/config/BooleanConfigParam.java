@@ -16,6 +16,9 @@ package com.sleepycat.je.config;
 /**
  * A JE configuration parameter with an boolean value.
  */
+// 专门用于表示和处理布尔型（Boolean）配置参数（即取值为 true 或 false 的配置项）
+// 布尔参数专属容器：继承自 ConfigParam，专门为布尔类型的配置项提供元数据支持。
+// 类型转换与校验：由于底层的 ConfigParam 统一使用字符串（String）来存储和传递配置值，该类负责将布尔型的默认值转换为字符串传给父类，并提供专门针对布尔值的严格校验逻辑，确保配置项只能是有效的 true 或 false。
 public class BooleanConfigParam extends ConfigParam {
 
     private static final String DEBUG_NAME =

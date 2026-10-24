@@ -51,18 +51,21 @@ import com.sleepycat.je.utilint.PropUtil;
  * instantiated. In order to keep replication code out of the base code,
  * replication parameters are loaded by way of the addConfigurations method.
  */
+// 内部存储引擎层（dbi）中的核心配置管理器
 public class DbConfigManager {
 
     /*
      * The name of the JE properties file, to be found in the environment
      * directory.
      */
+    // 定义了 JE 属性文件的标准名称常量（"je.properties"），该文件通常存放在数据库环境的根目录中。
     private static final String PROPFILE_NAME = "je.properties";
 
     /*
      * All properties in effect for this JE instance, both environment
      * and replication environment scoped, are stored in this Properties field.
      */
+    // 存储当前 JE 实例生效的所有属性键值对（既包含环境作用域的属性，也包含复制环境作用域的属性）。
     protected Properties props;
 
     /*
@@ -70,6 +73,7 @@ public class DbConfigManager {
      * that are fields in EnvironmentConfig, must be set before the
      * environment is created, and are not represented as JE properties.
      */
+    // 主要用于访问那些属于 EnvironmentConfig 类的实例字段、必须在环境创建前设置、且不表现为常规 JE 属性的调试属性。
     private final EnvironmentConfig environmentConfig;
 
     public DbConfigManager(EnvironmentConfig config) {
@@ -100,6 +104,7 @@ public class DbConfigManager {
      *
      * @return whether this parameter is specified.
      */
+    // 检查指定的配置参数是否已被用户显式配置
     public synchronized boolean isSpecified(ConfigParam configParam) {
         return props.containsKey(configParam.getName());
     }

@@ -31,6 +31,8 @@ import com.sleepycat.je.rep.impl.RepParams;
  * a parameter to {@link ReplicatedEnvironment#setMutableConfig} and is
  * returned by {@link ReplicatedEnvironment#getMutableConfig}.
  */
+// ReplicationMutableConfig 用于指定在复制环境（ReplicatedEnvironment）创建之后，仍然可以动态修改的复制相关属性。
+// 动态调整：通常许多数据库配置需要在节点启动或环境创建时指定，且运行期间无法更改。而该类中封装的参数允许管理员在集群运行时通过 ReplicatedEnvironment#setMutableConfig 进行动态调整（也可以通过 ReplicatedEnvironment#getMutableConfig 获取当前的动态配置）。
 public class ReplicationMutableConfig implements Cloneable, Serializable {
     private static final long serialVersionUID = 1L;
 
@@ -54,6 +56,7 @@ public class ReplicationMutableConfig implements Cloneable, Serializable {
      * </tr>
      * </table></p>
      */
+    // 如果设置为 true，在某个复制节点不可用时，仲裁者（Arbiter）可以替代其对事务进行确认（Ack）。
     public static final String ALLOW_ARBITER_ACK =
             EnvironmentParams.REP_PARAM_PREFIX + "allowArbiterAck";
 
@@ -73,6 +76,7 @@ public class ReplicationMutableConfig implements Cloneable, Serializable {
      * </tr>
      * </table></p>
      */
+    // 在只有两个节点的复制组中，用于标识哪一个节点是主节点（Primary），用来解决两节点下无法达成简单多数派（Simple Majority）的问题。
     public static final String DESIGNATED_PRIMARY =
         EnvironmentParams.REP_PARAM_PREFIX + "designatedPrimary";
 
@@ -122,6 +126,8 @@ public class ReplicationMutableConfig implements Cloneable, Serializable {
      * @see QuorumPolicy
      * @see com.sleepycat.je.Durability.ReplicaAckPolicy
      */
+    // 灾难恢复时的“逃生机制”（Escape Mechanism）。
+    // 当集群多数节点宕机导致无法自动满足选举法定人数时，可通过此参数人为指定当前可用的可选举节点数。若为 0 则表示正常通过元数据计算。
     public static final String ELECTABLE_GROUP_SIZE_OVERRIDE =
         EnvironmentParams.REP_PARAM_PREFIX + "electableGroupSizeOverride";
 
@@ -162,6 +168,7 @@ public class ReplicationMutableConfig implements Cloneable, Serializable {
      *
      * @see RollbackException
      */
+    // 当前节点的选举优先级。在选举 Master 时，日志最新的节点优先；若日志新旧程度相同，则依据此优先级决胜（Tie-breaker）。如果设为 0，则该节点永远不会被选为 Master。
     public static final String NODE_PRIORITY =
         EnvironmentParams.REP_PARAM_PREFIX + "node.priority";
 
@@ -214,6 +221,7 @@ public class ReplicationMutableConfig implements Cloneable, Serializable {
      * EnvironmentConfig#LOG_FLUSH_SYNC_INTERVAL} and {@link
      * EnvironmentConfig#LOG_FLUSH_NO_SYNC_INTERVAL} may not also be specified.
      */
+    // 控制是否在后台按时间间隔将已提交的事务日志刷盘。
     public static final String RUN_LOG_FLUSH_TASK =
         EnvironmentParams.REP_PARAM_PREFIX + "runLogFlushTask";
 
@@ -251,6 +259,7 @@ public class ReplicationMutableConfig implements Cloneable, Serializable {
      * as the flush sync interval; in this case, {@link
      * EnvironmentConfig#LOG_FLUSH_SYNC_INTERVAL} may not also be specified.
      */
+    // 后台日志缓冲区刷盘的时间间隔。
     public static final String LOG_FLUSH_TASK_INTERVAL =
         EnvironmentParams.REP_PARAM_PREFIX + "logFlushTaskInterval";
 
@@ -273,6 +282,7 @@ public class ReplicationMutableConfig implements Cloneable, Serializable {
      *
      * @since 5.0.38
      */
+    // 在重放（Replay）复制流时，最多保持打开状态的“最近最少使用”（LRU）数据库句柄数量。
     public static final String REPLAY_MAX_OPEN_DB_HANDLES =
         EnvironmentParams.REP_PARAM_PREFIX + "replayMaxOpenDbHandles";
 
@@ -294,6 +304,7 @@ public class ReplicationMutableConfig implements Cloneable, Serializable {
      * @see ReplicationMutableConfig#setHelperHosts
      * @see ReplicationMutableConfig#getHelperHosts
      */
+    // 指定一个或多个辅助节点（Helper Host）的主机名与端口对，格式为 hostname[:port][,hostname[:port]]*，新加入的节点通过它们来寻址并加入复制组。
     public static final String HELPER_HOSTS =
         EnvironmentParams.REP_PARAM_PREFIX + "helperHosts";
 
@@ -321,6 +332,7 @@ public class ReplicationMutableConfig implements Cloneable, Serializable {
      *
      * @since 5.0.38
      */
+    // 在复制流重放期间，处于不活跃状态的数据库句柄被自动关闭的最大超时时间。
     public static final String REPLAY_DB_HANDLE_TIMEOUT =
         EnvironmentParams.REP_PARAM_PREFIX + "replayOpenHandleTimeout";
 
@@ -364,6 +376,7 @@ public class ReplicationMutableConfig implements Cloneable, Serializable {
      * @see <a href="../EnvironmentConfig.html#timeDuration">Time Duration
      * Properties</a>
      */
+    // 在执行 transferMastership 转移主节点命令时，允许指定的 Replica 追赶原 Master 的最大超时时间。
     public static final String CATCHUP_MASTER_TIMEOUT =
         EnvironmentParams.REP_PARAM_PREFIX + "catchupMasterTimeout";
 
@@ -413,6 +426,7 @@ public class ReplicationMutableConfig implements Cloneable, Serializable {
      * Fills in the properties calculated by the environment to the given
      * config object.
      */
+    // 将由环境动态生成的属性填充到当前的配置对象中。
     void fillInEnvironmentGeneratedProps(RepImpl repImpl) {
         props.put(RepParams.DESIGNATED_PRIMARY.getName(),
                   Boolean.toString(repImpl.isDesignatedPrimary()));

@@ -197,37 +197,52 @@ final public class FeederManager {
      * updates if it throws an IllegalStateException.
      */
     private static volatile TestHook<NameIdPair> delayCBVLSNUpdateHook;
+    // FeederManager 类负责管理主节点（Master）上所有的 Feeder（数据馈送线程）。Feeder 的主要职责是将主节点上的复制流（Replication Stream）推送给连接的从节点（Replica）。
+    // RepNode repNode 当前复制节点（Replication Node）的控制对象。 提供了对整个复制环境实现（RepImpl）、心跳配置、参数配置管理器以及运行状态的全面访问能力。
 
     FeederManager(RepNode repNode) {
         this.repNode = repNode;
+        // 创建一个线程安全的、支持等待大小变化的特殊映射表 SizeAwaitMap，用于跟踪当前所有活跃的 Feeder（键为从节点名称，值为 Feeder 实例）
         activeFeeders = new SizeAwaitMap<String, Feeder>(
             repNode.getRepImpl(), new MatchElectableFeeders());
         logger = LoggerUtils.getLogger(getClass());
+        // 初始化性能统计组与计数器
         stats = new StatGroup(FeederManagerStatDefinition.GROUP_NAME,
                               FeederManagerStatDefinition.GROUP_DESC);
+        // 自启动以来创建的 Feeder 总数（运行累计值）。
         nFeedersCreated = new IntRunningTotalStat(stats, N_FEEDERS_CREATED);
+        // 自启动以来关闭的 Feeder 总数。
         nFeedersShutdown = new IntRunningTotalStat(stats, N_FEEDERS_SHUTDOWN);
+        // 所有从节点中最大的复制延迟值。
         nMaxReplicaLag = new LongMaxZeroStat(stats, N_MAX_REPLICA_LAG);
+        // 产生最大复制延迟的从节点名称。
         nMaxReplicaLagName = new StringStat(stats, N_MAX_REPLICA_LAG_NAME);
 
         /*
          * Treat delays and lags as valid for twice the heartbeat interval, to
          * allow for minor networking delays when receiving heartbeats
          */
+        // 初始化从节点监控与延迟指标图
+        // 计算指标的有效期阈值（设定为心跳间隔的两倍），用于容忍轻微的网络抖动。
         final long validityMillis = 2 * repNode.getHeartbeatInterval();
+        // 跟踪每个从节点的延迟时间（基于时间差）
         replicaDelayMap =
             new LongDiffMapStat(stats, REPLICA_DELAY_MAP, validityMillis);
+        // 记录每个从节点最后一次提交事务的时间戳。
         replicaLastCommitTimestampMap =
             new AtomicLongMapStat(stats, REPLICA_LAST_COMMIT_TIMESTAMP_MAP);
+        // 记录每个从节点最后一次提交的 VLSN（虚拟 LSN）。
         replicaLastCommitVLSNMap =
             new AtomicLongMapStat(stats, REPLICA_LAST_COMMIT_VLSN_MAP);
         replicaVLSNLagMap =
             new LongDiffMapStat(stats, REPLICA_VLSN_LAG_MAP, validityMillis);
+        // 跟踪每个从节点的 VLSN 落后差距（VLSN Lag）。
         replicaVLSNRateMap = new LongAvgRateMapStat(
             stats, REPLICA_VLSN_RATE_MAP, MOVING_AVG_PERIOD_MILLIS, MINUTES);
-
+        // 通过滑动时间窗口统计每个从节点的 VLSN 消费速率（Moving Average Rate）。
         pollTimeoutMs = repNode.getConfigManager().
             getDuration(RepParams.FEEDER_MANAGER_POLL_TIMEOUT);
+        // 用于定期或按需将 Durable Transacted VLSN 持久化，协调分布式事务的一致性。
         dtvlsnFlusher = new DTVLSNFlusher();
     }
 

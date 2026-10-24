@@ -133,6 +133,7 @@ public class RepParams {
      */
 
     /** Names the Replication group. */
+    // 复制组的名称
     public static final ConfigParam GROUP_NAME =
         new IdentifierConfigParam(ReplicationConfig.GROUP_NAME,
                                   "DefaultGroup",      // default
@@ -1151,6 +1152,7 @@ public class RepParams {
      * If true, the replica runs with this property will not join the
      * replication group.
      */
+    // 配置节点是否加入复制组，默认是false
     public static final BooleanConfigParam DONT_JOIN_REP_GROUP =
         new BooleanConfigParam(EnvironmentParams.REP_PARAM_PREFIX +
                                "dontJoinRepGroup",

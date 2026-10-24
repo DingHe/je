@@ -94,6 +94,14 @@ import com.sleepycat.je.utilint.Pair;
  * Transaction}.  Once {@link com.sleepycat.je.Environment#close
  * Environment.close} is called, this object may not be accessed again.
  */
+// Environment 类的核心作用
+// 统一管理基础设施：Environment 封装并管理了 JE 运行所需的四大核心子系统：
+// 缓存（Caching）：管理内存中的 B-Tree 数据结构与对象缓存。
+// 锁定（Locking）：提供细粒度的并发控制和事务隔离。
+// 日志（Logging）：管理事务日志（Log-Structured Storage）的追加、刷盘和清理。
+// 事务（Transactions）：支持 ACID 事务、崩溃恢复及原子操作。
+// 数据库句柄管理：作为工厂类，它负责打开、创建、关闭和管理常规数据库 (Database) 以及二级索引数据库 (SecondaryDatabase) 的生命周期。
+// 多句柄与并发支持：允许多个 Environment 实例（句柄）同时指向同一个物理目录；同时支持多线程并发访问。
 public class Environment implements Closeable {
 
     /**
@@ -104,6 +112,7 @@ public class Environment implements Closeable {
      * getNonNullEnvImpl methods. During close, while synchronized, it is safe
      * to access it directly.
      */
+    // 指向底层共享的实际环境实现类 (EnvironmentImpl)。在调用 close() 时会被设为 null 以释放引用防范内存泄漏。
     private volatile EnvironmentImpl environmentImpl;
 
     /*
@@ -119,13 +128,17 @@ public class Environment implements Closeable {
      * methods called by the ctor. However, after construction it is non-null
      * and should be treated as final.
      */
+    // 记录导致当前环境失效（Invalidated）的第一个严重异常。该引用与底层实现共享，即使环境关闭后也能向外部返回失败原因。
     private AtomicReference<EnvironmentFailureException> invalidatingEFE;
-
+    // 存储该环境的默认事务配置。
     private TransactionConfig defaultTxnConfig;
+    // 当前环境句柄所应用的可变配置副本。
     private EnvironmentMutableConfig handleConfig;
+    // 最终生效的环境完整配置（合并了代码设定和 je.properties 文件）。
     private final EnvironmentConfig appliedFinalConfig;
-
+    // 跟踪当前环境下所有处于打开状态的数据库句柄集合，用于在环境关闭时进行完整性检查。
     private final Map<Database, Database> referringDbs;
+    // 跟踪当前环境下所有处于打开状态的事务句柄集合。
     private final Map<Transaction, Transaction> referringDbTxns;
 
     /**
@@ -134,6 +147,8 @@ public class Environment implements Closeable {
      * ExceptionEvent's threadName argument when an exception is thrown in the
      * cleaner daemon thread.
      */
+    // 后台守护线程名称常量 (CLEANER_NAME, INCOMP_NAME, CHECKPOINTER_NAME, 等)
+    // 定义了 JE 内部各种后台守护线程的名称（如清理线程、压缩线程、检查点线程等），用于监控和异常上报。
     public static final String CLEANER_NAME = "Cleaner";
 
     /**
@@ -230,24 +245,31 @@ public class Environment implements Closeable {
      * @param envImpl is non-null only when used by EnvironmentImpl to
      * create an InternalEnvironment.
      */
+    // 所有单机环境句柄（Environment）以及高可用环境句柄（ReplicatedEnvironment）初始化的底层核心入口。
+    // File envHome  数据库环境的物理主目录（即存储 JE 日志文件、B-Tree 节点数据和元数据的文件夹路径）。
+    // EnvironmentConfig envConfig 应用程序传入的环境配置对象。 用于定制当前环境的各项属性（如缓存大小、是否允许创建、是否只读等）。如果为 null，后续代码会自动采用系统默认配置。
+    // RepConfigProxy repConfigProxy 复制配置代理接口。当在复制环境（HA）中初始化时，该参数用于向底层核心代码传入复制相关的配置，而单机核心代码无需直接依赖庞大的复制模块。在纯单机环境中通常传 null。
+    // EnvironmentImpl envImpl 底层环境实现类的实例。仅当由底层系统（如 EnvironmentImpl 自身）用来创建内部环境（InternalEnvironment）时才不为 null。如果由外部用户通过 new Environment(...) 调用，该参数通常为 null。
     protected Environment(File envHome,
                           EnvironmentConfig envConfig,
                           RepConfigProxy repConfigProxy,
                           EnvironmentImpl envImpl) {
-
+        // 用于跟踪和管理当前环境句柄下所有处于打开状态的数据库（Database）实例。
         referringDbs = new ConcurrentHashMap<Database, Database>();
+        // 用于跟踪和管理当前环境下所有处于打开状态的事务（Transaction）实例。
         referringDbTxns = new ConcurrentHashMap<Transaction, Transaction>();
-
+        // 对传入的环境主目录 envHome 进行非空校验。
         DatabaseUtil.checkForNullParam(envHome, "envHome");
-
+        // 设置并生成最终生效的环境配置对象，并将其赋值给常量字段 appliedFinalConfig。
         appliedFinalConfig =
             setupHandleConfig(envHome, envConfig, repConfigProxy);
-
+        // 如果传入了现成的 envImpl（说明当前正在创建内部辅助环境），则直接将该实例赋值给当前句柄的 environmentImpl。
         if (envImpl != null) {
             /* We're creating an InternalEnvironment in EnvironmentImpl. */
             environmentImpl = envImpl;
         } else {
             /* Open a new or existing environment in the shared pool. */
+            // 通过全局环境缓存池（DbEnvPool）去打开一个全新的或复用一个已存在的物理数据库环境，并将其注册到 JMX 监控中。
             environmentImpl =
                 makeEnvironmentImpl(envHome, envConfig, repConfigProxy);
         }
@@ -2486,6 +2508,7 @@ public class Environment implements Closeable {
      * invalid.
      * @throws IllegalStateException if the environment is not open.
      */
+    // 检查数据库环境是否正常，否则抛出异常
     EnvironmentImpl checkOpen() {
         final EnvironmentImpl envImpl = getNonNullEnvImpl();
         envImpl.checkOpen();
@@ -2506,6 +2529,7 @@ public class Environment implements Closeable {
      *
      * @throws IllegalStateException if the env has been closed.
      */
+    //
     EnvironmentImpl getNonNullEnvImpl() {
 
         final EnvironmentImpl envImpl = environmentImpl;

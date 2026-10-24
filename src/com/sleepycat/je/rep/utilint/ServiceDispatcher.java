@@ -163,6 +163,11 @@ public class ServiceDispatcher extends StoppableThread {
      *
      * @throws IOException if the socket could not be bound.
      */
+    // ServiceDispatcher 类的构造函数用于初始化一个网络服务调度器。
+    // 主要职责是在指定的网络端口上监听来自其他复制节点或客户端的服务请求（如节点间同步、心跳、数据传输等），并利用 NIO 的多路复用机制和线程池进行高效分发。
+    // InetSocketAddress socketAddress 指定调度器监听服务请求的套接字地址（包含 IP 和端口）
+    // RepImpl repImpl 底层的复制实现核心对象（Replication Implementation），代表当前节点所属的复制环境。
+    // DataChannelFactory channelFactory 数据通道工厂。
     public ServiceDispatcher(InetSocketAddress socketAddress,
                              RepImpl repImpl,
                              DataChannelFactory channelFactory)
@@ -174,8 +179,9 @@ public class ServiceDispatcher extends StoppableThread {
         this.repImpl = repImpl;
         this.socketAddress = socketAddress;
         this.channelFactory = channelFactory;
+        // erviceDispatcher 基于 Java NIO 的非阻塞 I/O 模型设计，通过这个 Selector 可以高效地监控和管理多个网络通道上的连接请求，避免为每个连接单独分配一个死循环线程。
         selector = Selector.open();
-
+        // 初始化日志与线程池命名变量
         String poolName = "ServiceDispatcherPool";
         NameIdPair nameIdPair = NameIdPair.NULL;
         if (repImpl == null) {
@@ -185,28 +191,35 @@ public class ServiceDispatcher extends StoppableThread {
             nameIdPair = repImpl.getNameIdPair();
             poolName += "_" + nameIdPair;
         }
-
+        // 创建可缓存的服务线程池
         pool = Executors.newCachedThreadPool
             (new StoppableThreadFactory(poolName, logger));
-
+        // 初始化复制消息格式化器
+        // 创建用于序列化或格式化复制网络通信消息的 ReplicationFormatter，并关联当前的节点标识。
         formatter = new ReplicationFormatter(nameIdPair);
-
+        // 绑定 Socket 监听地址
         bindSocket();
-
+        // 为后续建立的连接配置安全认证策略（如节点间的身份校验、密码或证书参数），确保只有合法的复制节点才能与当前节点通信。
         setAuthOptions();
     }
-
+    // 负责创建、配置并将服务调度器的底层网络套接字（Socket）绑定到指定的 IP 和端口上。该方法同时包含了端口占用的重试机制和环境诊断逻辑。
     private void bindSocket() throws IOException {
-
+        // 打开一个新的 Java NIO 服务端套接字通道。
         serverChannel = ServerSocketChannel.open();
+        // 将该通道显式设置为非阻塞模式（Non-blocking Mode），这是使用 Java NIO Selector 进行高性能异步事件多路复用的前提。
         serverChannel.configureBlocking(false);
+        // 将非阻塞的 serverChannel 注册到之前创建的 selector 上，并指定关心的事件为 SelectionKey.OP_ACCEPT（即接收客户端连接请求事件）。
         scKey = serverChannel.register(selector, SelectionKey.OP_ACCEPT);
+        // 获取底层标准 Socket 并禁用超时
         ServerSocket acceptSocket = serverChannel.socket();
         /* No timeout */
         acceptSocket.setSoTimeout(0);
 
         InetSocketAddress bindAddress = socketAddress;
         if (repImpl != null) {
+            // SO_REUSEADDR 检查
+            // 如果配置允许地址复用，则在 NIO 通道和经典 Socket 上同时开启 SO_REUSEADDR = true。
+            // 这允许服务器在重启时快速重新绑定刚才释放的端口（避免经典的 Address already in use 错误）
             if (repImpl.getConfigManager().getBoolean(SO_REUSEADDR)) {
 
                 /* Only turn it on if requested. Otherwise let it default. */
@@ -222,11 +235,12 @@ public class ServiceDispatcher extends StoppableThread {
                                                     socketAddress.getPort());
             }
         }
-
+        // 获取端口绑定的最大等待时间
         final int limitMs =  (repImpl != null) ?
             repImpl.getConfigManager().getInt(SO_BIND_WAIT_MS) : 0;
 
         /* Bind the socket */
+        // 带重试机制的端口绑定循环
         BindException bindException = null;
         final int retryWaitMs = 1000;
         int totalWaitMs;
@@ -245,7 +259,7 @@ public class ServiceDispatcher extends StoppableThread {
                 }
             }
         }
-
+        // 绑定失败时的诊断与日志记录
         if (bindException != null) {
             LoggerUtils.logMsg(logger, repImpl, formatter, Level.INFO,
                                "ServiceDispatcher HostPort=" +
@@ -269,6 +283,7 @@ public class ServiceDispatcher extends StoppableThread {
 
             /* Failed after retrying. */
             throw bindException;
+        // 成功绑定后的延迟日志记录
         } else if (totalWaitMs != 0) {
             LoggerUtils.logMsg(logger, repImpl, formatter, Level.INFO,
                                "ServiceDispatcher HostPort=" +

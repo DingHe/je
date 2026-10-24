@@ -45,42 +45,52 @@ import com.sleepycat.je.rep.net.SSLAuthenticator;
  *    If in non-blocking mode:
  *       read() and write are not guaranteed to consume or produce anything.
  */
+// 提供基于 SSL/TLS 的加密通信：SSLDataChannel 继承自 AbstractDataChannel，它在标准的底层 SocketChannel 之上封装了 SSLEngine，实现了全双工的安全加密、解密及握手管理。
+// 兼容 SocketChannel 语义：它在设计上努力维持与传统 SocketChannel 一致的请求完成语义（如在阻塞模式下确保 read 读到数据、write 写入完整缓冲区；在非阻塞模式下则不会发生死锁或无限等待）。
+// 安全验证与信任管理：集成并支持 HostnameVerifier（主机名校验）和 SSLAuthenticator（对端身份认证器），在 SSL 握手完成后自动对服务器身份或客户端对端进行合法性校验。
 public class SSLDataChannel extends AbstractDataChannel {
     /**
      * The SSLEngine that will manage the secure operations.
      */
+    // Java 提供的核心 SSL 引擎，负责控制整个连接的安全交互、加密（Wrap）、解密（Unwrap）以及握手状态机。
     private final SSLEngine sslEngine;
 
     /**
      * raw bytes received from the SocketChannel - not yet unwrapped.
      */
+    // 从底层 SocketChannel 读取出来的原始加密字节缓冲区（尚未解密）。
     private final ByteBuffer netRecvBuffer;
 
     /**
      * raw bytes to be sent to the wire - already wrapped
      */
+    // 准备发送到网上的原始加密字节缓冲区（已经过 wrap 加密处理）。
     private final ByteBuffer netXmitBuffer;
 
     /**
      * Bytes unwrapped and ready for application consumption.
      */
+    // 经过 unwrap 解密后、准备供上层应用消费的明文缓冲区。
     private final ByteBuffer appRecvBuffer;
 
     /**
      * A dummy buffer used during handshake operations.
      */
+    // 大小为 1 的哑元缓冲区（Dummy buffer），在 SSL 握手过程中（例如 NEED_WRAP 状态下需要向对方发送握手数据但又没有应用层明文输入时）提供空数据支持。
     private final ByteBuffer emptyXmitBuffer;
 
     /**
      * Lock object for protection of appRecvBuffer, netRecvBuffer and SSLEngine
      * unwrap() operations
      */
+    // 读操作锁。用于并发保护 appRecvBuffer、netRecvBuffer 以及 SSLEngine.unwrap() 的线程安全。
     private final ReentrantLock readLock = new ReentrantLock();
 
     /**
      * Lock object for protection of netXmitBuffer and SSLEngine wrap()
      * operations
      */
+    // 写操作锁。用于并发保护 netXmitBuffer 以及 SSLEngine.wrap() 的线程安全。
     private final ReentrantLock writeLock = new ReentrantLock();
 
     /* Set to true if we have closed the underlying socketChannel */

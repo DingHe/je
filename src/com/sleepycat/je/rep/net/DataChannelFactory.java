@@ -21,6 +21,9 @@ import java.nio.channels.SocketChannel;
  * @hidden
  * Interface for creating DataChannel instances.
  */
+// 数据通道工厂接口：DataChannelFactory 负责创建和管理 DataChannel 实例。DataChannel 是 BDB JE 用于节点间加密、安全传输或普通网络通信的抽象数据通道。
+// 统一连接管理与配置：它定义了两种核心能力：一是主动发起连接（通过指定目标地址和连接选项连接到远程节点），二是被动接受连接（将新接收到的底层 SocketChannel 包装并适配为 BDB JE 的 DataChannel）。
+// 支持定制化网络行为：通过内部类 ConnectOptions，它允许开发者对底层 Socket 链接的各项参数（如超时时间、缓冲区大小、阻塞模式、Nagle 算法等）进行精细化配置。
 public interface DataChannelFactory {
     /**
      * Creates a DataChannel from an newly accepted socketChannel
@@ -29,17 +32,25 @@ public interface DataChannelFactory {
      * @return an implementation of DataChannel that wraps the
      *         input SocketChannel
      */
+    // 接受并包装一个新连接的套接字通道。
+    // SocketChannel socketChannel：服务端新接收到的底层标准 SocketChannel。
     DataChannel acceptChannel(SocketChannel socketChannel);
 
     /**
      * A collection of options to apply to a connection.
      */
+    // 用于封装连接选项的静态内部类，所有的 set* 方法都返回当前对象本身（支持链式调用）。
     public class ConnectOptions {
+        // 是否启用 TCP_NODELAY 选项。默认值为 false。
         private boolean tcpNoDelay = false;
+        // 套接字接收缓冲区大小（字节）。默认值为 0（表示使用系统默认值）。
         private int receiveBufferSize = 0;
+        // 建立连接时的超时时间（毫秒）。默认值为 0（无自定义超时/系统默认）。
         private int openTimeout = 0;
         private int readTimeout = 0;
+        // 是否使用阻塞式 I/O 模式。默认值为 true。
         private boolean blocking = true;
+        // 是否启用 SO_RESUEADDR（地址复用）选项。默认值为 false。
         private boolean reuseAddr = false;
 
         /**
@@ -209,6 +220,8 @@ public interface DataChannelFactory {
      *        applied to the connection.
      * @return A DataChannel connected to the the specified address.
      */
+    // 连接到指定的网络地址，并应用相应的连接配置选项。
+    // InetSocketAddress addr：目标节点的网络地址（IP 和端口）。工厂的实现也可以通过中间代理来转发该连接。
     DataChannel connect(InetSocketAddress addr,
                         ConnectOptions connectOptions)
         throws IOException;

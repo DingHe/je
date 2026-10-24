@@ -18,13 +18,20 @@ import java.nio.ByteBuffer;
 import com.sleepycat.je.log.LogUtils;
 import com.sleepycat.je.log.Loggable;
 
+// VLSN 全称为 Virtual Log Sequence Number（虚拟日志序列号）。它是 JE 分布式复制架构中的基石类
+// 为复制日志条目（Replicated Log Entry）提供一个全局唯一的顺序标识符。 在多节点复制组中，无论是日志同步、事务提交、流追赶（Catchup），还是前文探讨过的选举排名（Ranking）计算，都高度依赖 VLSN 来界定日志的新鲜度与一致性边界。
+// 唯一标识复制日志：替代或补充了物理 LSN（Log Sequence Number），为网络传输和分布式存储中的每条复制日志提供抽象的逻辑序号。
+// 支持边界与空状态处理：内置了 NULL_VLSN（无效/空）、FIRST_VLSN（起始序号 1）以及 UNINITIALIZED_VLSN_SEQUENCE（未初始化），完美处理各种边界和历史兼容场景。
 public class VLSN implements Loggable, Comparable<VLSN>, Serializable {
     private static final long serialVersionUID = 1L;
-
+    // 磁盘/网络序列化占用字节数
+    // 因为底层是 long 类型，所以固定占用 8 个字节。
     public static final int LOG_SIZE = 8;
-
+    // 空 VLSN 的底层数值常量，定义为 -1。
     public static final int NULL_VLSN_SEQUENCE = -1;
+    // 全局共享的“空/无效” VLSN 实例（序号为 -1），用于表示未分配或不存在的状态。
     public static final VLSN NULL_VLSN = new VLSN(NULL_VLSN_SEQUENCE);
+    // 全局共享的“首个合法” VLSN 实例（序号为 1），代表复制日志的开端。
     public static final VLSN FIRST_VLSN = new VLSN(1);
 
     /*
@@ -32,6 +39,8 @@ public class VLSN implements Loggable, Comparable<VLSN>, Serializable {
      * been set in log entry fields, because the field did not exist in that
      * version of the log or in a non-HA commit/abort variant of a log entry.
      */
+    // 未初始化序列号常量（定义为 0）
+    // 用于标识那些在旧版本日志或非 HA 提交/中止变体中尚未被赋值的字段。
     public static final int UNINITIALIZED_VLSN_SEQUENCE = 0;
 
     /*
@@ -40,6 +49,8 @@ public class VLSN implements Loggable, Comparable<VLSN>, Serializable {
      * its in-memory footprint. In that case, the VLSN value would be a long,
      * and this class would provide static utility methods.
      */
+    // 底层的核心序列号数值。
+    // 存储实际的 VLSN 长整型数值（例如 1, 2, 3...）。它是整个类的核心数据载体。
     private long sequence;   // sequence number
 
     public VLSN(long sequence) {
@@ -90,6 +101,7 @@ public class VLSN implements Loggable, Comparable<VLSN>, Serializable {
     /**
      * Return a VLSN which would follow this one.
      */
+    // 获取紧随其后的下一个 VLSN。
     public VLSN getNext() {
         return isNull() ? FIRST_VLSN : new VLSN(sequence + 1);
     }
@@ -97,6 +109,7 @@ public class VLSN implements Loggable, Comparable<VLSN>, Serializable {
     /**
      * Return a VLSN which would precede this one.
      */
+    // 获取紧邻其前的一个 VLSN。
     public VLSN getPrev() {
         return (isNull() || (sequence == 1)) ?
                 NULL_VLSN :
@@ -107,6 +120,7 @@ public class VLSN implements Loggable, Comparable<VLSN>, Serializable {
      * Return true if this VLSN's sequence directly follows the "other"
      * VLSN. This handles the case where "other" is a NULL_VLSN.
      */
+    // 判断当前 VLSN 是否紧跟在另一个 VLSN 之后
     public boolean follows(VLSN other) {
         return ((other.isNull() && sequence == 1) ||
                 ((!other.isNull()) &&
@@ -156,6 +170,7 @@ public class VLSN implements Loggable, Comparable<VLSN>, Serializable {
      * unless both are NULL_VLSN
      * @throws IllegalArgumentException if either argument is null
      */
+    // 计算两个 VLSN 中的较小者
     public static VLSN min(final VLSN a, final VLSN b) {
         if ((a == null) || (b == null)) {
             throw new IllegalArgumentException(
@@ -172,6 +187,7 @@ public class VLSN implements Loggable, Comparable<VLSN>, Serializable {
     /**
      * @see Loggable#getLogSize
      */
+    // 返回序列化占用的字节数，固定返回 LOG_SIZE（即 8 字节）。
     @Override
     public int getLogSize() {
         return LOG_SIZE;
@@ -180,6 +196,7 @@ public class VLSN implements Loggable, Comparable<VLSN>, Serializable {
     /**
      * @see Loggable#writeToLog
      */
+    // 将 VLSN 序列化写入日志缓冲区。
     @Override
     public void writeToLog(ByteBuffer buffer) {
         LogUtils.writeLong(buffer, sequence);

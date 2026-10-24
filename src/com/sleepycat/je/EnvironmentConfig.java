@@ -190,6 +190,14 @@ import com.sleepycat.je.util.DbVerifyLog;
  * {@link TimeUnit} argument, such as {@link #setLockTimeout(long)} and {@link
  * #getLockTimeout()}, use microsecond durations and have been deprecated.</p>
  */
+// EnvironmentConfig 类的作用
+// 定义与管理环境属性：
+// 用于在创建 Environment（或高可用环境 ReplicatedEnvironment）之前定制各种行为参数。
+// 支持同时配置不可变属性（只能在环境首次打开时指定，如是否只读、缓存大小初始化等）和可变属性（继承自父类，支持在运行期动态修改）。
+// 三层优先级规则：
+// 优先级最高：环境主目录下 je.properties 文件中指定的配置项。
+// 其次：通过代码创建 EnvironmentConfig 对象并在构造 Environment 时传入的配置。
+// 优先级最低：系统默认值（由类中的字符串常量定义）。
 public class EnvironmentConfig extends EnvironmentMutableConfig {
     private static final long serialVersionUID = 1L;
 
@@ -236,6 +244,7 @@ public class EnvironmentConfig extends EnvironmentMutableConfig {
      * @see <a href="EnvironmentStats.html#cacheSizing">Cache Statistics:
      * Sizing</a>
      */
+    // 直接以字节为单位配置 JE 的主缓存（Main Cache）大小。若为 0，则由 MAX_MEMORY_PERCENT 决定。
     public static final String MAX_MEMORY = "je.maxMemory";
 
     /**
@@ -312,6 +321,7 @@ public class EnvironmentConfig extends EnvironmentMutableConfig {
      * @see <a href="EnvironmentStats.html#cacheSizing">Cache Statistics:
      * Sizing</a>
      */
+    // 将 JE 主缓存大小配置为 JVM 最大堆内存（-Xmx）的百分比。
     public static final String MAX_MEMORY_PERCENT = "je.maxMemoryPercent";
 
     /**
@@ -423,6 +433,7 @@ public class EnvironmentConfig extends EnvironmentMutableConfig {
      * @see <a href="EnvironmentStats.html#cacheSizing">Cache Statistics:
      * Sizing</a>
      */
+    // 配置堆外内存（Off-Heap Cache）的字节数，用于在堆外缓存 B-tree 节点和记录，从而减轻 JVM 垃圾回收（GC）压力。
     public static final String MAX_OFF_HEAP_MEMORY = "je.maxOffHeapMemory";
 
     /**
@@ -456,6 +467,7 @@ public class EnvironmentConfig extends EnvironmentMutableConfig {
      * @see <a href="EnvironmentStats.html#cacheSizing">Cache Statistics:
      * Sizing</a>
      */
+    // 若设为 true，当前环境将与其他同样开启此选项的环境共享同一个进程级别的缓存。
     public static final String SHARED_CACHE = "je.sharedCache";
 
     /**
@@ -631,6 +643,7 @@ public class EnvironmentConfig extends EnvironmentMutableConfig {
      * @see #getMaxDisk()
      * @since 7.5
      */
+    // 限制数据库数据存储占用的最大字节数。若超出，写操作将抛出 DiskLimitException。
     public static final String MAX_DISK = "je.maxDisk";
 
     /**
@@ -689,6 +702,7 @@ public class EnvironmentConfig extends EnvironmentMutableConfig {
      * @see #MAX_DISK
      * @since 7.5
      */
+    // 磁盘卷和每个 Environment 必须保留的最低空闲磁盘空间。若低于此值，写操作将被禁止，以防止磁盘被完全填满导致无法恢复。
     public static final String FREE_DISK = "je.freeDisk";
 
     /**
@@ -705,6 +719,7 @@ public class EnvironmentConfig extends EnvironmentMutableConfig {
      * </tr>
      * </table></p>
      */
+    // 若为 true，即使日志以检查点结尾，也会在崩溃恢复完成后强制执行一个新的检查点。
     public static final String ENV_RECOVERY_FORCE_CHECKPOINT =
         "je.env.recoveryForceCheckpoint";
 
@@ -3680,6 +3695,7 @@ public class EnvironmentConfig extends EnvironmentMutableConfig {
      * @see Durability
      * @see #setDurability
      */
+    // 事务持久性配置参数
     public static final String TXN_DURABILITY = "je.txn.durability";
 
     /**
@@ -4018,7 +4034,7 @@ public class EnvironmentConfig extends EnvironmentMutableConfig {
      * For unit testing, to prevent writing utilization data during checkpoint.
      */
     private transient boolean checkpointUP = true;
-
+    // 是否允许自动创建数据库
     private boolean allowCreate = false;
 
     /**

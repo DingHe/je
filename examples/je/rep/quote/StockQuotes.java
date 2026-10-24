@@ -51,12 +51,11 @@ import com.sleepycat.persist.EntityStore;
  * <p>
  * The program can be used to start up multiple stock quote servers supplying
  * the following arguments:
- *
  * <pre>
- * java je.rep.quote.StockQuotes -env &lt;environment home&gt; \
- *                               -nodeName &lt;nodeName&gt; \
- *                               -nodeHost &lt;hostname:port&gt; \
- *                               -helperHost &lt;hostname:port&gt;
+ * java je.rep.quote.StockQuotes -env &lt;environment home&gt; 复制 JE 环境的预存在目录\
+ *                               -nodeName &lt;nodeName&gt; 用于在复制群组中唯一标识该节点的名称\
+ *                               -nodeHost &lt;hostname:port&gt; 该节点的唯一主机名与端口对\
+ *                               -helperHost &lt;hostname:port&gt;辅助节点的主机名与端口对组合。只有当该节点在复制群组形成期间被指定为初始主节点（Master）时，它才与 nodeHost 相同。
  * </pre>
  *
  * The argument names resemble the {@link ReplicationConfig} names to draw
@@ -75,22 +74,23 @@ import com.sleepycat.persist.EntityStore;
  *
  * A typical demo session begins with a set of commands such as the following
  * to start each node. The first node can be started as below:
- *
+ * 典型的演示会话通常以一组类似下面的命令开始，用于启动各个节点。第一个节点可以按如下方式启动：
  * <pre>
  * java je.rep.quote.StockQuotes -env dir1 -nodeName n1 \
  *                               -nodeHost node.acme.com:5001 \
  *                               -helperHost node.acme.com:5001
  * </pre>
- *
+ * 请注意，由于这是群组中的第一个节点，因此 helperHost 和 nodeHost 是相同的。
  * Note that the <code>helperHost</code> and the <code>nodeHost</code> are the
  * same, since it's the first node in the group. HA uses this fact to start a
  * brand new replication group of size one, with this node as the master if
  * there is no existing environment in the environment directory
+ * 如果环境目录 dir1 中尚不存在现有环境，HA 会利用这一事实来启动一个规模为 1 的全新复制群组，并以该节点作为主节点。
  * <code>dir1</code>.
  * <p>
  * Nodes can be added to the group by using a variation of the above. The
  * second and third node can be started as follows:
- *
+ * 可以通过上述命令的变体向群组中添加更多节点。第二和第三个节点可以按如下方式启动：
  * <pre>
  * java je.rep.quote.StockQuotes -env dir2 -nodeName n2 \
  *                               -nodeHost node.acme.com:5002 \
@@ -102,34 +102,50 @@ import com.sleepycat.persist.EntityStore;
  * </pre>
  *
  * Note that each node has its own unique node name, and a distinct directory
- * for its replicated environment. This and any subsequent nodes can use the
+ * for its replicated environment.
+ * 请注意，每个节点都有自己唯一的节点名称，以及用于其复制环境的独立目录。
+ * This and any subsequent nodes can use the
  * first node as a helper to get itself going. In fact, you can pick any node
- * already in the group to serve as a helper. So, for example when adding the
+ * already in the group to serve as a helper.
+ *  本节点及任何后续节点都可以使用第一个节点作为辅助节点（helper）来引导自己启动。
+ * So, for example when adding the
  * third node, node 2 or node 1, could serve as helper nodes. The helper nodes
  * simply provide a mechanism to help a new node get itself admitted into the
  * group. The helper node is not needed once a node becomes part of the group.
+ * 事实上，你可以选择群组中已经存在的任意节点来充当辅助节点。例如，在添加第三个节点时，节点 2 或节点 1 都可以充当辅助节点。
+ * 辅助节点仅提供一种机制，帮助新节点被接纳加入群组。一旦节点成为群组的一部分，就不再需要辅助节点了。
  * <p>
  * When initially running the example, please use a group of at least three
  * nodes.  A two node group is a special case, and it is best to learn how to
- * run larger groups first.  For more information, see
+ * run larger groups first.
+ * 最初运行此示例时，请使用至少包含三个节点的群组。两个节点的群组属于特例，最好先学习如何运行规模更大的群组。
+ * For more information, see
  * <a href="{@docRoot}/../ReplicationGuide/lifecycle.html#twonode">
  * Two-Node Replication Groups</a>.  When initially creating the nodes, it is
  * also important to start the master first.
  * <p>
  * But once the nodes have been created, the order in which the nodes are
- * started up does not matter. It minimizes the initial overall group startup
+ * started up does not matter.
+ * 但一旦节点创建完成，启动节点的顺序就无关紧要了。不过，优先启动主节点（即 helperHost 与 nodeHost 相同的那个节点）可以最大限度地减少整个群组的初始启动时间，
+ * It minimizes the initial overall group startup
  * time to have the master (the one where the <code>helperHost</code> and the
  * <code>nodeHost</code> are the same) node started first, since the master
  * initializes the replicated environment and is ready to start accepting and
  * processing commands even as the other nodes concurrently join the group.
  * <p>
  * The above commands start up a group with three nodes all running locally on
- * the same machine. You can start up nodes on different machines connected by
+ * the same machine.
+ * 上述命令启动了一个包含三个节点的群组，这些节点全部在本地同一台机器上运行。
+ * You can start up nodes on different machines connected by
  * a TCP/IP network by executing the above commands on the respective machines.
+ * 如果通过 TCP/IP 网络将节点运行在不同的机器上，只需在各自的机器上执行上述命令即可。
  * It's important in this case that the clocks on these machines, be reasonably
  * synchronized, that is, they should be within a couple of seconds of each
- * other. You can do this manually, but it's best to use a protocol like <a
+ * other.
+ * 在这种情况下，这些机器上的时钟保持合理同步非常重要，即它们的误差应该在几秒钟以内。
+ * You can do this manually, but it's best to use a protocol like <a
  * href="http://www.ntp.org/">NTP</a> for this purpose.
+ * 你可以手动同步，但最好为此目的使用诸如 NTP 之类的协议。
  * <p>
  * Upon subsequent restarts the nodes will automatically hold an election and
  * select one of the nodes in the group to be the master. The choice of master

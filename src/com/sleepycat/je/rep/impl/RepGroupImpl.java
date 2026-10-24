@@ -38,30 +38,41 @@ import com.sleepycat.je.rep.impl.RepGroupDB.NodeBinding;
  * have the same consistent picture of the replication group at a single point
  * in time, but will converge to become consistent eventually.
  */
+// 整个复制组（Replication Group）拓扑与状态在内存中的整体快照实现
+// 负责维护复制组内的所有成员节点信息、组全局唯一标识、格式版本、节点 ID 自增序列以及版本演进控制。
+// 维护复制组拓扑全貌：统一管理复制集群中所有的节点信息（包括选举节点、Monitor、Secondary 节点、Arbiter 等），并支持通过节点 ID 和节点名称双重索引进行高效检索。
+// 支持动态成员变更与冲突检测：提供成员的添加、删除、冲突检测（如 Socket 地址冲突排查）等核心群组治理功能。
+// 支持协议序列化与版本兼容：实现了将整个复制组及其包含的节点序列化为字节流或十六进制字符串（serializeHex, serializeBytes 等），并管理支持不同 JE 版本的格式化版本号（formatVersion 和 minJEVersion）。
 public class RepGroupImpl {
 
     /** The latest supported format version. */
+    // 最新支持的格式版本号
     public static final int MAX_FORMAT_VERSION = 3;
 
     /**
      * Format version introduced in JE 6.0.1 that records a node's most recent
      * JE version, and the minimum JE version required to join the group.
      */
+    // 在 JE 6.0.1 引入的格式版本，用于记录节点的最新 JE 版本及加入集群所需的最低版本。
     public static final int FORMAT_VERSION_3 = 3;
 
     /**
      * The latest format version that is compatible with JE 6.0.0 and earlier
      * versions.
      */
+    // 与 JE 6.0.0 及更早版本兼容的最高格式版本。
     public static final int FORMAT_VERSION_2 = 2;
 
     /** The initial format version for newly created RepGroupImpl instances. */
+    // 新创建的 RepGroupImpl 实例的默认初始格式版本。
     public static final int INITIAL_FORMAT_VERSION = 3;
 
     /** The oldest supported format version. */
+    // 当前代码支持的最老格式版本。
     static final int MIN_FORMAT_VERSION = 2;
 
     /** The first JE version that supports FORMAT_VERSION_3. */
+    // 支持相应格式版本的最低 JE 引擎版本对象（如 "6.0.1" 与 "5.0.0"）。
     public static final JEVersion FORMAT_VERSION_3_JE_VERSION =
         new JEVersion("6.0.1");
 
@@ -72,6 +83,7 @@ public class RepGroupImpl {
         new JEVersion("5.0.0");
 
     /** The initial change version. */
+    // 初始变更版本号。
     private final static int CHANGE_VERSION_START = 0;
 
     /*
@@ -79,6 +91,7 @@ public class RepGroupImpl {
      * because a node is still in the process of joining the group. This value
      * cannot be created by UUID.randomUUID
      */
+    // 当节点刚加入集群、尚未通过复制流同步到组数据库时使用的特殊占位 UUID。
     private final static UUID UNKNOWN_UUID = new UUID(0, 0);
 
     /**
@@ -86,16 +99,21 @@ public class RepGroupImpl {
      * the same time time.  This number of transient id node IDs will be
      * reserved at the top of the node ID range.
      */
+    // 允许同时加入群组的具有瞬态 ID（Transient ID，如 Secondary 节点）的最大数量。
     public static final int MAX_NODES_WITH_TRANSIENT_ID = 1024;
 
     /** The first node ID for persistent nodes. */
+    // 持久化节点的起始节点 ID 与最大节点 ID 范围限制。
     private static final int NODE_SEQUENCE_START = 0;
 
     /** The maximum node ID for persistent nodes. */
+    // 定义了持久化节点（Persistent Nodes）所能使用的最大节点 ID
     private static final int NODE_SEQUENCE_MAX =
         Integer.MAX_VALUE - MAX_NODES_WITH_TRANSIENT_ID;
-
+    // 主要用于在复制组中根据节点的类型（NodeType）进行快速筛选和归类
     /** Returns true if the node is electable. */
+    // 可选举节点过滤器
+    // 当节点属于有选举权、可以参与选主并可能成为 Master 的核心节点时，该谓词返回 true
     private static final Predicate ELECTABLE_PREDICATE = new Predicate() {
         @Override
         boolean include(final RepNodeImpl n) {
@@ -104,6 +122,8 @@ public class RepGroupImpl {
     };
 
     /** Returns true if the node is a monitor. */
+    // 监控节点过滤器。
+    // 用于筛选出群组中的 Monitor（监控）节点。这类节点仅用于观察集群状态或监控主节点，不参与投票，也不存储完整的数据写入。
     private static final Predicate MONITOR_PREDICATE = new Predicate() {
         @Override
         boolean include(final RepNodeImpl n) {
@@ -112,6 +132,8 @@ public class RepGroupImpl {
     };
 
     /** Returns true if the node is secondary. */
+    // 次要/辅助节点过滤器。
+    // 用于筛选出 Secondary（次要）类型的节点。这类节点通常拥有瞬态 ID，不直接参与 Paxos 选举投票，但在复制架构中承担数据同步与读取分流。
     private static final Predicate SECONDARY_PREDICATE = new Predicate() {
         @Override
         boolean include(final RepNodeImpl n) {
@@ -120,6 +142,8 @@ public class RepGroupImpl {
     };
 
     /** Returns true if the node is external. */
+    // 外部节点过滤器
+    // 用于筛选出标记为外部（External）角色的节点
     private static final Predicate EXTERNAL_PREDICATE = new Predicate() {
         @Override
         boolean include(final RepNodeImpl n) {
@@ -128,6 +152,8 @@ public class RepGroupImpl {
     };
 
     /** Returns true if the node can return acks but is not an Arbiter. */
+    // 参与数据确认（ACK）但非仲裁者的节点过滤器
+    // 筛选出那些具备可选举资格、需要对事务提交进行确认（ACK），但同时又不是 Arbiter（仲裁者）的常规数据节点。
     private static final Predicate ACK_PREDICATE = new Predicate() {
         @Override
         boolean include(final RepNodeImpl n) {
@@ -136,6 +162,8 @@ public class RepGroupImpl {
     };
 
     /** Returns true if the node is an arbiter. */
+    // 仲裁者节点过滤器
+    // 筛选出集群中的 Arbiter（仲裁者）节点。Arbiter 仅参与选举投票以帮助凑齐法定人数（Quorum），但不保存数据库的用户数据副本。
     private static final Predicate ARBITER_PREDICATE = new Predicate() {
         @Override
         boolean include(final RepNodeImpl n) {
@@ -144,28 +172,33 @@ public class RepGroupImpl {
     };
 
     /* The name of the Replication Group. */
+    // 复制组的逻辑名称
     private final String groupName;
 
     /*
      * The universally unique UUID associated with the replicated environment.
      */
+    // 复制环境的全局唯一标识符（UUID）
     private UUID uuid;
 
     /*
      * The version number associated with this group's format in the database.
      */
+    // 当前数据库中使用的成员组格式版本号
     private volatile int formatVersion;
 
     /*
      * Tracks the change version level. It's updated with every change to the
      * member set in the membership database.
      */
+    // 变更版本号。每当组内成员发生增删改等变动时自增，用于追踪配置演进。
     private int changeVersion = 0;
 
     /*
      * The most recently assigned node ID for persistent nodes.  Node IDs for
      * persistent nodes are never reused.
      */
+    // 持久化节点的最新自增节点 ID 序列。
     private int nodeIdSequence;
 
     /*
@@ -179,6 +212,7 @@ public class RepGroupImpl {
      */
 
     /* All the nodes that form the replication group, indexed by Id. */
+    // 按内部数字 ID 索引的所有节点映射表（核心主数据源）。
     private final Map<Integer, RepNodeImpl> nodesById =
         new HashMap<Integer, RepNodeImpl>();
 
@@ -187,10 +221,12 @@ public class RepGroupImpl {
      * This map is used exclusively for efficient lookups by name. The map
      * nodesById does all the heavy lifting.
      */
+    // 按用户定义的节点名称索引的节点映射表（用于按名称高效查找）
     private final Map<String, RepNodeImpl> nodesByName =
         new HashMap<String, RepNodeImpl>();
 
     /** The minimum JE version required for nodes to join the group. */
+    // 节点加入该组所需的最低 JE 版本要求
     private volatile JEVersion minJEVersion = MIN_FORMAT_VERSION_JE_VERSION;
 
     /**
@@ -251,6 +287,13 @@ public class RepGroupImpl {
      * @param changeVersion
      * @param minJEVersion
      */
+    // RepGroupImpl 类代表整个复制组的内存实现。这段代码展示了它的一个核心构造函数，通常用于重建现有的复制组对象（例如在反序列化操作期间从持久化存储或网络流中恢复数据）
+    // String groupName  复制组的名称（Group Name）。例如多个节点组成同一个复制集群时共享的逻辑集群名。
+    // UUID uuid  该复制组的全局唯一标识符（UUID）。用于确保不同复制集群之间不会发生混淆或跨集群错误通信。
+    // int formatVersion  成员数据库的格式版本号（Format Version）。用于处理数据库结构演进和向后兼容。
+    // int changeVersion 复制组的变更版本号（Change Version）。每当组内成员发生变动（如添加、删除节点或修改配置）时，该版本号会递增，用来追踪群组配置的更新演进。
+    // int nodeIdSequence 节点 ID 的自增序列号。用于在向复制组中动态添加新节点时，安全地分配下一个不重复的数字节点 ID。
+    // JEVersion minJEVersion 允许加入该复制 group 所需的最低 JE 引擎版本（Minimum JE Version）。
     public RepGroupImpl(String groupName,
                         UUID uuid,
                         int formatVersion,
@@ -263,7 +306,8 @@ public class RepGroupImpl {
         this.changeVersion = changeVersion;
         setNodeIdSequence(nodeIdSequence);
         this.minJEVersion = minJEVersion;
-
+        // 检查反序列化出来的格式版本是否在当前代码所支持的最小（MIN_FORMAT_VERSION）与最大（MAX_FORMAT_VERSION）范围之内。如果超出了支持范围（说明数据库格式来自过旧或过新、无法识别的版本），
+        // 则直接抛出 IllegalStateException 异常
         if (formatVersion < MIN_FORMAT_VERSION ||
             formatVersion > MAX_FORMAT_VERSION) {
             throw new IllegalStateException(

@@ -140,22 +140,32 @@ import com.sleepycat.je.utilint.LoggerUtils;
 import com.sleepycat.je.utilint.StatGroup;
 import com.sleepycat.je.utilint.StringStat;
 import com.sleepycat.je.utilint.VLSN;
-
+// RepImpl 是 Berkeley DB JE 高可用复制模块（High Availability, HA）的核心引擎实现类。它直接继承自单机版核心引擎类 EnvironmentImpl，并实现了 RepEnvConfigObserver 接口。
+// 高可用环境的控制中心：作为单机 EnvironmentImpl 在复制集群环境下的扩展与超集，它统筹管理整个复制节点（ReplicatedEnvironment）的所有底层服务、状态机与网络通信。
+// 复制状态与同步管理者：负责维护集群中节点的身份（Master/Replica/Arbiter 等）、管理复制组元数据、协调复制日志重放（Replay）、追踪全局虚拟 LSN（VLSNIndex）以及处理节点间的心跳与选举。
+// 支持动态热更新：通过实现 RepEnvConfigObserver 接口，能够实时监听并动态调整高可用复制相关的可变配置属性。
 public class RepImpl
     extends EnvironmentImpl
     implements RepEnvConfigObserver {
-
+    // VLSN 索引实例。VLSN（Replication Virtual LSN）是 Berkeley DB JE 高可用复制模块的核心概念。它为复制流中的每一条日志记录分配一个单调递增的虚拟序列号（VLSN），
+    // 并维护 VLSN 到物理 LSN（Log Sequence Number）的双向映射。该索引是副本节点同步、日志重放和一致性检查的基础。
     private VLSNIndex vlsnIndex;
     /* VLSNIndexAccess coordinates the closing of the vlsn index */
+    // VLSN 索引关闭协调器。正如注释所述，它专门用于协调和控制在数据库环境关闭（特别是检查点前后）时如何安全、有序地关闭和持久化 vlsnIndex 占用的资源。
     private final VLSNIndexAccess vlsnIndexAccess = new VLSNIndexAccess();
-
+    // Feeder 事务管理器。当当前节点作为主节点（Master）通过 Feeder 线程向其他副本（Replica）或订阅者传输日志流时，该组件负责管理和追踪与传输流相关的活跃事务上下文。
     private final FeederTxns feederTxns;
 
     /*
      * The repNode is only non-null when the replicated environment has joined
      * a group. It's null otherwise.
      */
+    // 复制节点核心控制实例。
+    // 仅当当前高可用复制环境已经成功加入一个复制组（Group）时才不为 null；在未加入或断开连接状态下均为 null。
+    // 它封装了网络通信、心跳、选举和主从角色逻辑。被声明为 volatile 是为了确保多线程环境下对节点状态变更的可见性。
     private volatile RepNode repNode;
+    // 日志重放引擎（Replay）。它是副本节点（Replica）的核心组件。
+    // 负责接收来自主节点的复制日志条目，并在本地数据库中进行解析、应用和重放，以保持副本数据与主节点强一致或最终一致。
     private Replay replay;
 
     /*
@@ -163,14 +173,20 @@ public class RepImpl
      * Id part of the pair will be updated when the node actually joins the
      * group.
      */
+    // 节点的规范化名称与 ID 对（Name-ID Pair）。
+    // 点使用的规范化标识实例。它包含节点的字符串名称（Name）和内部数字 ID（ID）。
+    // 其中内部 ID 部分会在节点真正加入复制组、从集群分配到有效 ID 后被动态更新。
     private NameIdPair nameIdPair;
-
+    // 节点状态机管理器。
+    // 负责实时追踪、记录和维护当前复制环境所处的高可用状态（例如 MASTER、REPLICA、DETACHED、UNKNOWN 等），并对外提供状态查询和状态变更事件通知支持。
     private final NodeState nodeState;
 
     /*
      * The clockskew used by this environment in ms. It's only used by testing
      * to inject clock skew between ReplicatedEnvironments.
      */
+    // 时钟偏移量（毫秒）
+    // 仅用于测试环境
     private static int clockSkewMs = 0;
 
     /*
@@ -182,33 +198,45 @@ public class RepImpl
      * databaseImpl handle can be managed more easily to mesh with the opening
      * and closing of the RepImpl.
      */
+    // 复制组元数据数据库（Group Database）的内部实现句柄。
+    // 只有在首次需要访问复制组成员信息时才会被创建和打开，并在环境关闭时被置为 null。
+    // 采用延迟初始化的原因是：复制组数据库是由集群的主节点（Master）创建的，而新节点在启动初期并不能立刻知晓谁是主节点
     private DatabaseImpl groupDbImpl = null;
 
     /* The status presents whether this replica is doing rollback. */
+    // 备份禁止标志（回滚状态保护）
+    // 指示当前副本节点是否正在执行日志回滚（Rollback）操作。在回滚期间，为了防止数据处于不一致状态或引发冲突，通常会禁止外部发起数据库备份（Backup）。
     private boolean backupProhibited = false;
 
     /*
      * Represents whether this Environment is allowed to convert a
      * non-replicated Environment to replicated.
      */
+    // 允许单机转复制环境标志。
     private boolean allowConvert = false;
 
     /** Config params for preserving and caching the VLSN. */
+    // 保留 VLSN 配置标志。
+    // 指示系统是否需要为每条记录持久化并保留其虚拟 LSN（VLSN）版本信息（通常用于高级数据一致性追踪或时间旅行查询）。
     private boolean preserveVLSN;
+    // 缓存 VLSN 配置标志。
     private boolean cacheVLSN;
 
     /*
      * True if TTL is available. Volatile is not used, since checking more than
      * once is idempotent.
      */
+    // 指示当前环境是否支持并启用了 TTL 特性。正如注释所述，由于多次检查结果是幂等的，因此这里没有使用 volatile 修饰。
     private boolean isTTLAvailable = false;
 
     /* Keep an eye on the ongoing DbBackups. */
+    // 活跃数据库备份集合。
     private final Set<DbBackup> backups = new HashSet<DbBackup>();
 
     /*
      * The list of observers who are notified when a mutable rep param changes.
      */
+    // 复制配置变更观察者列表。
     private final List<RepEnvConfigObserver> repConfigObservers;
 
     /*
@@ -217,28 +245,40 @@ public class RepImpl
      * than synchronization to allow us to probe for contention on the
      * groupDbImpl.
      */
+    // 组数据库延迟初始化与访问互斥锁。
+    // 用于控制对 groupDbImpl（复制组元数据数据库）的并发访问和安全初始化，确保仅创建一个实例。
     private final ReentrantLock groupDbLock = new ReentrantLock();
-
+    // 副本确认超时时间。控制主节点等待副本对写入日志进行 ACK 确认的最大等待时间。
     private int replicaAckTimeout;
+    // 仲裁器确认超时时间。控制主节点等待仲裁器响应 ACK 的超时限制。
     private int arbiterAckTimeout;
+    // 副本不足超时时间。当集群中存活的副本数量不满足法定人数（Quorum）要求时，写操作在超时后会抛出异常。
     private int insufficientReplicasTimeout;
+    // 重放事务锁超时时间。副本节点在重放主节点日志事务时所采用的锁超时阈值。
     private int replayTxnTimeout;
+    // 默认副本一致性策略。定义了副本在执行读操作时默认要求的一致性约束。
     private ReplicaConsistencyPolicy defaultConsistencyPolicy;
+    // 是否允许仲裁器参与写确认的布尔标志。
     private boolean allowArbiterAck;
 
     /*
      * Arbiters, subscribers and networkBackup use RepImpls which are read
      * only and have some daemon functionality disabled.
      */
+    // 指示当前节点是否为仲裁器（Arbiter）角色。
     private boolean isArbiter;
+    // 指示当前节点是否为订阅者（Subscriber）角色。
     private boolean isSubscriber;
+    // 指示当前节点是否为网络备份（Network Backup）角色。
     private boolean isNetworkBackup;
 
     /*
      * NodeStats are currently not public, but we may want to evaluate
      * and decide if they would be useful, perhaps as a debugging aid.
      */
+    // 复制节点专有的统计指标聚合组。
     private final StatGroup nodeStats;
+    // 指示当前节点是否经历了硬恢复（Hard Recovery）的布尔统计项。
     private final BooleanStat hardRecoveryStat;
     private final StringStat hardRecoveryInfoStat;
 
@@ -246,6 +286,8 @@ public class RepImpl
      * Used to block transaction commit/abort execution just before completing
      * a Master Transfer operation.
      */
+    // 事务阻塞门栓（CountDownLatch）。
+    // 当主节点转移完成第一阶段后，会通过设置一个新的门栓来临时阻塞前台事务在提交或中止阶段的完成，以便安全锁定终极 VLSN。
     private volatile CountDownLatch blockTxnLatch = new CountDownLatch(0);
 
     /**
@@ -271,34 +313,44 @@ public class RepImpl
      * @see MasterTransfer
      * @see ReplicatedEnvironment#transferMaster
      */
+    // 由于存在“事务等待门栓与发布 VLSN 之间的时间差”以及“Feeder 输入线程需要通过事务更新 GroupDB（不能被死板阻塞）”这两种特殊情况，
+    // 必须通过该公平读写锁来精细化协调对 blockTxnLatch 的访问，避免死锁或阻碍主节点转移的进展。
     private final ReentrantReadWriteLock blockLatchLock =
         new ReentrantReadWriteLock(true);
 
     /* application listener for syncups. */
+    // 同步阶段进度监听器。允许应用程序监听节点间进行日志同步（Syncup）时的进度。
     private final ProgressListener<SyncupProgress> syncupProgressListener;
 
     /* Application callback to be notified before we overwrite log files. */
+    // 日志文件重写/覆盖前监听器。在底层的日志文件被覆盖或重写前触发应用回调。
     private final LogFileRewriteListener logRewriteListener;
 
     /* Configuration for ServiceDispatcher communication */
+    // 服务分发器（ServiceDispatcher）通信网络配置。
     private final ReplicationNetworkConfig repNetConfig;
 
     /*
      * Factory for creating channel instances.  Not available until
      * initializeChannelFactory is called.
      */
+    // 网络通信通道工厂。
+    // 负责创建节点间传输数据的底层 Socket 通道，在调用 initializeChannelFactory() 之前为 null。
     private volatile DataChannelFactory channelFactory;
 
     /**
      * Used for testing, to create log files with
      * VLSN.UNINITIALIZED_VLSN_SEQUENCE as the value for the dtvlsn
      */
+    // 模拟旧版本 DTVLSN 主节点的测试开关。仅用于测试，允许创建将 DTVLSN 设为未初始化序列的日志文件。
     private static boolean simulatePreDTVLSNMaster = false;
 
     /*
      * Used to verify VLSN invariants as they are written to the log on the
      * master
      */
+    // 主节点 VLSN 写入不变式校验历史值。
+    // 用于在主节点将日志写入磁盘时，实时校验 VLSN 和 DTVLSN 是否严格单调递增，确保不变式不被打破。
     private long prevLoggedVLSN = VLSN.NULL_VLSN_SEQUENCE;
     private long prevLoggedDTVLSN = VLSN.NULL_VLSN_SEQUENCE;
 
@@ -306,12 +358,15 @@ public class RepImpl
      * The filter transmitted to a Feeder so that records can be filtered at
      * the source
      */
+    // Feeder 源头日志过滤器。用于在主节点向副本传输日志流时，在源头直接对记录进行过滤。
     private final FeederFilter feederFilter;
 
     /**
      * The feeder authenticator generator is instantiated by the replicated
      * environment creator.
      */
+    // 复制流认证器（Stream Authenticator）。
+    // 由复制环境的创建者实例化并注入，用于在副本连接主节点或订阅数据时进行身份验证与安全校验。
     private volatile StreamAuthenticator authenticator = null;
 
     public RepImpl(File envHome,
@@ -1727,6 +1782,7 @@ public class RepImpl
      *
      * @return the hostname
      */
+    // 负责从当前节点的复制配置中解析并返回该节点绑定的主机名（Hostname）
     public String getHostName() {
         String hostAndPort = configManager.get(RepParams.NODE_HOST_PORT);
         int colonToken = hostAndPort.indexOf(":");
@@ -1740,6 +1796,7 @@ public class RepImpl
      *
      * @return the port number
      */
+    // 负责从当前节点的配置中解析并返回复制节点所使用的网络端口号（Port）
     public int getPort() {
         String hostAndPort = configManager.get(RepParams.NODE_HOST_PORT);
         int colonToken = hostAndPort.indexOf(":");
@@ -1749,6 +1806,7 @@ public class RepImpl
     }
 
     /* Convenience method for returning replication sockets. */
+    // 用于构建并返回当前复制节点网络通信所使用的完整套接字地址对象
     public InetSocketAddress getSocket() {
         return new InetSocketAddress(getHostName(), getPort());
     }

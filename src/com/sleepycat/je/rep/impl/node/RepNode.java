@@ -129,6 +129,12 @@ import com.sleepycat.je.utilint.VLSN;
  * either the FeederManager is active, or the Replica is and the same common
  * thread control can be shared between the two.
  */
+// RepNode 是 Berkeley DB JE 高可用复制（HA）模块中代表单个复制节点运行时的核心控制中心。
+// 复制节点的总指挥部：负责管理节点在集群中的完整生命周期，包括启动、查找主节点、加入集群（joinGroup）、参与选举（Elections）、维护集群元数据（RepGroupDB）等。
+// 双重角色承载（Master 与 Replica）：
+// 当节点竞选成功成为主节点（Master）时，它会启动 FeederManager，负责向所有副本（Replicas）推送复制日志流。
+// 当节点处于副本节点（Replica）角色时，它会通过 Replica 实例连接主节点，接收日志并在本地通过 Replay 引擎进行重放。
+// 分布式一致性与活性保障：封装了全局和本地 CBVLSN 追踪器、DTVLSN（持久化事务 VLSN）同步、选举法定人数仲裁（ElectionQuorum & DurabilityQuorum）以及网络服务分发器（ServiceDispatcher）。
 public class RepNode extends StoppableThread {
 
     /*
@@ -136,18 +142,23 @@ public class RepNode extends StoppableThread {
      * the rep group. There is a canonical instance of this that's updated
      * when the node joins the group.
      */
+    // 节点的规范化名称与内部 ID 对（在加入集群后会被赋予实际数字 ID）。
     private final NameIdPair nameIdPair;
 
     /* The service dispatcher used by this replication node. */
+    // 网络服务分发器，负责监听和分发各种内部网络服务请求（如状态查询、节点状态服务、组管理服务等）。
     private final ServiceDispatcher serviceDispatcher;
 
     /* The election instance for this node */
+    // 选举实例，负责管理节点之间的 Paxos 或主从选举流程。
     private Elections elections;
 
     /* The locus of operations when the node is a replica. */
+    // 副本操作的核心 locus（当节点为 Replica 时使用）。
     private final Replica replica;
 
     /* Used when the node is a feeder. */
+    // Feeder 管理器（当节点为 Master 时使用，负责向外分发日志流）。
     private FeederManager feederManager;
 
     /*
@@ -157,19 +168,24 @@ public class RepNode extends StoppableThread {
      * is, nodeState, may reflect a different state until the transition to
      * this state has been completed.
      */
+    // 主节点状态追踪器。
     private final MasterStatus masterStatus;
+    // 主节点变更监听器。
     private final MasterChangeListener changeListener;
+    // 主节点建议生成器。
     private final MasterSuggestionGenerator suggestionGenerator;
 
     /*
      * Represents the application visible state of this node. It may lag the
      * state as described by masterStatus.
      */
+    // 应用可见的节点状态对象。
     private final NodeState nodeState;
-
+    // 底层复制环境实现类的引用。
     private final RepImpl repImpl;
 
     /* The encapsulated internal replication group database. */
+    // 封装的内部复制组元数据数据库操作对象。
     final RepGroupDB repGroupDB;
 
     /*
@@ -185,11 +201,13 @@ public class RepNode extends StoppableThread {
      * legitimate member of the group, established a sync point, and is ready
      * to start replaying the replication stream.
      */
+    // 用于指示当前节点是否已成功确立为 Master 或 Replica 并完成初始化，准备好立即提供服务。
     private volatile ExceptionAwareCountDownLatch readyLatch = null;
 
     /*
      * Latch used to freeze txn commit VLSN advancement during an election.
      */
+    // 用于在选举期间冻结事务提交 VLSN 推进的门栓。
     private final CommitFreezeLatch vlsnFreezeLatch = new CommitFreezeLatch();
 
     /**
@@ -201,6 +219,7 @@ public class RepNode extends StoppableThread {
      * Always use the setGroup() method to set this iv, so that needsAck in
      * particular is updated in unison.
      */
+    // 当前节点持有的复制组拓扑定义快照（动态更新）。
     volatile private RepGroupImpl group;
 
     /**
@@ -210,12 +229,14 @@ public class RepNode extends StoppableThread {
      *
      * Only update via the setGroup method.
      */
+    // 指示是否需要其他节点进行 ACK 确认（根据数据节点和可选举节点数量决定）。
     volatile private boolean needsAcks = false;
 
     /*
      * Determines the election policy to use when the node holds its very first
      * elections
      */
+    // 初始选举法定人数策略（默认为简单多数派）
     private QuorumPolicy electionQuorumPolicy = QuorumPolicy.SIMPLE_MAJORITY;
 
     /*
@@ -232,7 +253,7 @@ public class RepNode extends StoppableThread {
      * skews.
      */
     private final Clock clock;
-
+    // 网络恢复日志 Feeder 管理器。
     private com.sleepycat.je.rep.impl.networkRestore.FeederManager
         logFeederManager;
     private LDiffService ldiff;
@@ -241,12 +262,14 @@ public class RepNode extends StoppableThread {
     private GroupService groupService;
 
     /* tracks the local CBVLSN for this node. */
+    // 追踪本地 CBVLSN（Consistent Backlog VLSN）的追踪器。
     final LocalCBVLSNTracker cbvlsnTracker;
 
     /* The currently in-progress Master Transfer operation, if any. */
     private MasterTransfer xfrInProgress;
 
     /* calculates and manages the global, cached CBVLSN */
+    // 计算和管理全局缓存 CBVLSN 的组件。
     final GlobalCBVLSN globalCBVLSN;
 
     /* Determines how long to wait for a replica to catch up on a close. */
@@ -268,13 +291,17 @@ public class RepNode extends StoppableThread {
     final Logger logger;
 
     /* Locus of election and durability quorum decisions */
+    // 选举仲裁决策逻辑。
     private final ElectionQuorum electionQuorum;
+    // 持久性仲裁决策逻辑。
     private final DurabilityQuorum durabilityQuorum;
-
+    // 仲裁器实例。
     private final Arbiter arbiter;
+    // 当前节点的类型（如 ELECTABLE, SECONDARY 等）。
     private final NodeType nodeType;
 
     /** Manages the allocation of node IDs for secondary nodes. */
+    // 管理二级节点临时 ID 分配的实例。
     private final TransientIds transientIds =
         new TransientIds(RepGroupImpl.MAX_NODES_WITH_TRANSIENT_ID);
 
@@ -286,6 +313,7 @@ public class RepNode extends StoppableThread {
      * @see #setMinJEVersion
      * @see #addTransientIdNode
      */
+    // 用于同步设置最低 JE 版本或添加临时节点的锁对象。
     private final Object minJEVersionLock = new Object();
 
     /* Used by tests only. */
@@ -315,6 +343,7 @@ public class RepNode extends StoppableThread {
      * DTVLSN</a>
      *
      */
+    // 内存中的 DTVLSN（Durable Transaction VLSN）。代表已知已被复制并持久化到多数派副本中的最高事务 VLSN。
     private final AtomicLongMax dtvlsn =
         new AtomicLongMax(VLSN.NULL_VLSN_SEQUENCE);
 
@@ -342,48 +371,65 @@ public class RepNode extends StoppableThread {
      */
     public static volatile TestHook<String> beforeFindRestoreSupplierHook;
 
+    // RepNode 类代表集群中的一个复制节点。
+    // 构造函数 (RepNode) 是整个节点运行时环境的核心初始化入口。
+    // RepImpl repImpl 底层的复制实现对象（Replication Implementation）。它是连接存储引擎、配置管理、日志系统和复制核心控制器的枢纽。
+    // Replay replay 回放器对象。负责在 Replica（副本）节点上接收并回放来自 Master（主节点）的事务日志记录（Log Entries），以保持数据同步。
+    // NodeState nodeState 节点状态封装对象。用于管理和跟踪当前节点在复制组中的生命周期状态（如 MASTER、REPLICA 等）以及状态变更通知。
     public RepNode(RepImpl repImpl,
                    Replay replay,
                    NodeState nodeState)
         throws IOException, DatabaseException {
 
         super(repImpl, "RepNode " + repImpl.getNameIdPair());
-
+        // 保存传入的复制环境实现引用。
         this.repImpl = repImpl;
         readyLatch = new ExceptionAwareCountDownLatch(repImpl, 1);
         nameIdPair = repImpl.getNameIdPair();
         logger = LoggerUtils.getLogger(getClass());
-
+        // 负责监听和分发节点间各种底层网络服务请求（如心跳、日志同步、文件传输等）。
         this.serviceDispatcher =
             new ServiceDispatcher(getSocket(), repImpl,
                                   repImpl.getChannelFactory());
+        // 开启网络监听
         serviceDispatcher.start();
+        // 时钟与复制组数据库初始化：
         clock = new Clock(RepImpl.getClockSkewMs());
+        // 初始化复制组元数据数据库（RepGroupDB），用于持久化存储和读取复制组成员配置、节点加入/退出等元数据。
         this.repGroupDB = new RepGroupDB(repImpl);
-
+        // 跟踪和维护当前已知的主节点（Master）状态信息。
         masterStatus = new MasterStatus(nameIdPair);
+        // 通过工厂创建副本（Replica）运行时组件，负责接收和处理来自主节点的数据流。
         replica = ReplicaFactory.create(this, replay);
-
+        // 创建 Feeder 管理器。Feeder 是 Master 端向 Replica 发送日志流的线程服务管理者。
         feederManager = new FeederManager(this);
+        // 创建主节点变更监听器。
         changeListener = new MasterChangeListener(this);
+        // 创建主节点建议生成器（用于在选举时评估哪个节点更适合成为 Master）。
         suggestionGenerator = new MasterSuggestionGenerator(this);
 
         this.nodeState = nodeState;
-
+        // 初始化选举法定人数判定器（决定选举需要多少票才能通过）
         electionQuorum = new ElectionQuorum(repImpl);
+        // 初始化持久性法定人数判定器（决定事务提交需要多少个节点确认）。
         durabilityQuorum = new DurabilityQuorum(repImpl);
-
+        // 启动内部的一些辅助工具服务
         utilityServicesStart();
+        // 初始化全局和本地的 CBVLSN（Checkpoint Basic Version LSN）追踪器，用于垃圾回收和安全截断日志。
         this.globalCBVLSN = new GlobalCBVLSN(this);
         this.cbvlsnTracker = new LocalCBVLSNTracker(this, globalCBVLSN);
+        // 初始化监控事件管理器，用于向外部发送复制监控事件。
         this.monitorEventManager = new MonitorEventManager(this);
         timer = new Timer(true);
+        // 注册网络通道超时检查任务到定时器中。
         channelTimeoutTask = new ChannelTimeoutTask(timer);
-
+        // 初始化仲裁者组件（用于只有 2 个数据节点加 1 个 Arbiter 的特殊高可用部署拓扑）
         arbiter = new Arbiter(repImpl);
+        // 从配置管理器中读取并解析当前节点的类型（如 PRIMARY、SECONDARY、ARBITER 等）
         nodeType = NodeType.valueOf(getConfigManager().get(NODE_TYPE));
-
+        // 更新 DTVLSN（Durability Transaction Verifiable LSN），它是复制协议中用于确保持久性和脑裂防护的关键 LSN 指标。
         dtvlsn.updateMax(repImpl.getLoggedDTVLSN());
+        // 打印一条启动日志，记录当前节点启动时的初始 DTVLSN 数值，便于后期排查恢复和同步状态。
         LoggerUtils.info(logger, repImpl,
                            String.format("DTVLSN at start:%,d", dtvlsn.get()));
     }
@@ -559,7 +605,7 @@ public class RepNode extends StoppableThread {
     public NameIdPair getNameIdPair() {
         return nameIdPair;
     }
-
+    // 获取复制节点的网络地址
     public InetSocketAddress getSocket() {
         return repImpl.getSocket();
     }

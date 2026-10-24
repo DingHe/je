@@ -22,12 +22,19 @@ import com.sleepycat.je.EnvironmentFailureException;
  * Validation can be done in the scope of this parameter, or as a function of
  * other parameters.
  */
+// 配置参数的元数据容器，用于定义和描述 JE 中每一个具体配置项的元信息
+// 封装配置元数据：ConfigParam 封装了单个配置参数的核心属性，包括参数名称 (name)、默认值 (defaultValue)、是否支持运行时动态修改 (mutable)、是否属于复制/HA模块 (forReplication) 以及是否为多值参数 (isMultiValueParam)。
+// 统一校验与注册：在创建 ConfigParam 实例时，它会自动对参数名和默认值进行合法性校验，并将其自动注册到 JE 全局的支持参数列表（EnvironmentParams.SUPPORTED_PARAMS）中，供整个配置管理系统（如 DbConfigManager）统一调用和校验。
 public class ConfigParam {
-
+    // 存储配置参数的名称（例如 "je.maxMemory" 或 "je.rep.groupName"）。如果是多值参数，这里存储的是截断后的基础名称。
     protected String name;
+    // 存储该配置项的默认值（以字符串形式保存）。当应用程序未显式设置该参数时，系统将采用此默认值。
     private String defaultValue;
+    // 标识该配置参数是否是可变参数。如果为 true，表示该参数在环境创建后（运行期间）可以通过 setMutableConfig 动态修改；如果为 false，则属于不可变参数（只能在环境初始化时指定）。
     private boolean mutable;
+    // 标识该配置参数是否属于高可用/复制（Replication）模块的参数。用于在解析和校验时区分普通单机配置与复制相关配置。
     private boolean forReplication;
+    // 标识该参数是否为多值参数（Multi-Value Param，即名称中带有 .# 标识的参数，允许配置多个同类项，如多个远程地址）。
     private boolean isMultiValueParam;
 
     /*

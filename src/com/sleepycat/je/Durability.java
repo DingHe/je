@@ -23,6 +23,11 @@ import java.util.StringTokenizer;
  * the local {@link SyncPolicy} plus the {@link ReplicaAckPolicy} used by the
  * master and the {@link SyncPolicy} in effect at each Replica.
  */
+// Durability 是 Berkeley DB Java Edition (JE) 中定义事务持久性（Durability）特性的核心类。
+// 在单机环境下，事务的持久性由本地的同步策略决定；
+// 而在高可用（HA）复制环境中，整体持久性则由主节点的本地同步策略、副本节点的同步策略以及主节点所需的副本确认策略共同决定。
+// 定义事务持久性级别：通过组合不同的本地日志刷盘策略（SyncPolicy）和网络确认策略（ReplicaAckPolicy），允许开发者在事务性能和数据安全性/持久性之间做出权衡。
+// 支持复制环境确认：在分布式复制集群中，它决定了 Master 节点在提交事务时必须等待多少个 Replica 节点的确认（ACK），从而确保即使发生主备切换，已提交的数据也不会丢失。
 public class Durability {
 
     /**
@@ -33,6 +38,7 @@ public class Durability {
      * commits of replicated transactions that need acknowledgment and
      * SIMPLE_MAJORITY for the acknowledgment policy.
      */
+    // 本地提交时强制同步刷盘（SYNC），并要求得到简单多数派（Simple Majority）副本的确认。
     public static final Durability COMMIT_SYNC =
         new Durability(SyncPolicy.SYNC,                // localSync
                        SyncPolicy.NO_SYNC,             // replicaSync
@@ -46,6 +52,7 @@ public class Durability {
      * commits of replicated transactions that need acknowledgment and
      * SIMPLE_MAJORITY for the acknowledgment policy.
      */
+    // 本地提交时不进行同步刷盘（NO_SYNC，依赖后台异步刷盘或日志缓冲区），但仍要求多数派副本确认。这是复制环境的默认推荐策略，兼顾性能与高可用。
     public static final Durability COMMIT_NO_SYNC =
         new Durability(SyncPolicy.NO_SYNC,      // localSync
                        SyncPolicy.NO_SYNC,      // replicaSync
@@ -59,6 +66,7 @@ public class Durability {
      * commits of replicated transactions that need acknowledgment and
      * SIMPLE_MAJORITY for the acknowledgment policy.
      */
+    // 本地提交时将日志写入操作系统但不同步刷盘（WRITE_NO_SYNC），并要求多数派副本确认。
     public static final Durability COMMIT_WRITE_NO_SYNC =
         new Durability(SyncPolicy.WRITE_NO_SYNC,// localSync
                        SyncPolicy.NO_SYNC,      // replicaSync
@@ -89,6 +97,8 @@ public class Durability {
      * that the transaction is persistent to disk, but trade that off for
      * lower performance.
      */
+    // 事务提交同步策略
+    // 定义了节点在提交事务时如何将日志写入磁盘：
     public enum SyncPolicy {
 
         /**
@@ -98,6 +108,7 @@ public class Durability {
          *  <p>
          *  This is the default.
          */
+        // 写入并同步刷盘（Fsync）。满足完整的 ACID 属性，数据最安全，但性能开销最大（默认值）。
         SYNC,
 
         /**
@@ -111,6 +122,7 @@ public class Durability {
          * often the operating system flushes dirty buffers to disk, and how
          * often the log is checkpointed.
          */
+        // 既不写入也不同步刷盘。满足 ACI，但不保证 D（持久性）。若系统崩溃，最近提交的事务可能会丢失。
         NO_SYNC,
 
         /**
@@ -123,6 +135,7 @@ public class Durability {
          * governed by how often the operating system flushes dirty buffers to
          * disk, and how often the log is checkpointed.
          */
+        // 写入操作系统缓冲区但不同步刷盘。若操作系统崩溃可能丢失数据，但能防范应用进程崩溃。
         WRITE_NO_SYNC
     };
 
@@ -139,6 +152,8 @@ public class Durability {
      * <p>Note that SECONDARY nodes are not included in the set of replicas
      * that must acknowledge transaction commits.
      */
+    // 副本确认策略
+    // 定义了 Master 节点提交事务时需要多少个可选举（ELECTABLE）Replica 的网络确认：
     public enum ReplicaAckPolicy {
 
         /**
@@ -147,6 +162,7 @@ public class Durability {
          * group has a small number of ELECTABLE replicas, and those replicas
          * are on extremely reliable networks and servers.
          */
+        // 要求所有可选举 Replica 确认。适用于极小且网络极其可靠的集群。
         ALL,
 
         /**
@@ -155,6 +171,7 @@ public class Durability {
          * transaction durability is determined entirely by the type of commit
          * that is being performed on the master.
          */
+        // 不需要任何确认，Master 提交不等待 Replica。持久性完全取决于 Master 本地。
         NONE,
 
         /**
@@ -166,6 +183,7 @@ public class Durability {
          * <p>
          * This is the default.
          */
+        // 要求简单多数派（$groupSize / 2 + 1$）的可选举 Replica 确认（默认值）。配合多数派选举策略，能保证故障转移后数据不丢失。
         SIMPLE_MAJORITY;
 
         /**
@@ -177,6 +195,7 @@ public class Durability {
          *
          * @return the number of ELECTABLE replicas needed
          */
+        // 根据当前复制组中可选举节点的总数（groupSize），计算并返回满足该确认策略所需的最少确认节点数。
         public int minAckNodes(int groupSize) {
             switch (this) {
             case ALL:

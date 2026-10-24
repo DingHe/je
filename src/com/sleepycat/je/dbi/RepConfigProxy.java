@@ -18,6 +18,8 @@ import com.sleepycat.je.ReplicaConsistencyPolicy;
 /**
  * Used to pass a replication configuration instance through the non-HA code.
  */
+// 用于获取当前复制环境或事务所配置的副本一致性策略。
+// 在分布式复制集群中，当客户端在 Replica（副本）节点上发起读操作时，一致性策略决定了该 Replica 必须追赶主节点（Master）到什么程度（例如：允许的最大时间滞后、事务提交序号差距等），当前读请求才被允许执行。
 public interface RepConfigProxy {
     public ReplicaConsistencyPolicy getConsistencyPolicy();
 }

@@ -83,6 +83,11 @@ import com.sleepycat.je.dbi.EnvironmentImpl;
  *
  * @see EnvironmentConfig
  */
+// 用于管理数据库环境打开后仍可动态修改的配置属性的配置类
+// 核心作用体现在：
+// 分类管理可变配置：
+//单句柄属性（Per-Environment Handle Properties）：仅对单个 Environment 实例生效（例如单句柄的事务持久性 Durability、txnNoSync 等）。
+//环境全局可变属性（Environment-Wide Mutable Properties）：对整个物理环境（所有共享同一底层环境的实例）整体生效（例如调整缓存大小 maxMemory、停止后台清理线程等）。
 public class EnvironmentMutableConfig implements Cloneable, Serializable {
     private static final long serialVersionUID = 1L;
 
@@ -90,7 +95,9 @@ public class EnvironmentMutableConfig implements Cloneable, Serializable {
      * Change copyHandlePropsTo and Environment.copyToHandleConfig when adding
      * fields here.
      */
+    // 指示是否配置为异步事务（不刷盘也不写日志同步），默认值为 false（已废弃，由 Durability 取代）。
     private boolean txnNoSync = false;
+    // 指示是否配置为只写日志但不刷盘的事务，默认值为 false（已废弃，由 Durability 取代）。
     private boolean txnWriteNoSync = false;
 
     /**
@@ -99,19 +106,23 @@ public class EnvironmentMutableConfig implements Cloneable, Serializable {
      * application and never used internally; internal code directly checks
      * with the MemoryBudget class;
      */
+    // 数据库系统可用的内存缓存大小（以字节为单位）。
+    // 该属性由环境变量计算得出，主要用于向应用层返回缓存大小时使用，内部直接从 MemoryBudget 获取。
     private long cacheSize;
-
+    // 堆外内存（Off-Heap）缓存大小（以字节为单位）
     private long offHeapCacheSize;
 
     /**
      * Note that in the implementation we choose not to extend Properties in
      * order to keep the configuration type safe.
      */
+    // 存储所有环境配置参数键值对的属性包对象
     Properties props;
 
     /**
      * For unit testing, to prevent loading of je.properties.
      */
+    // 瞬态布尔标志，用于单元测试中防止自动加载 je.properties 文件。
     private transient boolean loadPropertyFile = true;
 
     /**
@@ -120,9 +131,11 @@ public class EnvironmentMutableConfig implements Cloneable, Serializable {
      * during setVal() calls.  Only should be set to false by unit tests using
      * DbInternal.
      */
+    // 指示在调用 setVal() 时是否对参数值进行合法性校验
     transient boolean validateParams = true;
-
+    // 后台守护线程抛出异步异常时的回调监听器实例。
     private transient ExceptionListener exceptionListener = null;
+    // 该环境中执行操作的默认缓存模式
     private CacheMode cacheMode;
 
     /**

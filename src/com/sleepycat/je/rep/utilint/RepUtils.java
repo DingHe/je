@@ -247,6 +247,9 @@ public class RepUtils {
      * more specifically the new awaitOrException method to be exited via an
      * exception.
      */
+    // 具备异常感知能力的倒计时锁：该类继承自 Java 标准库的 CountDownLatch。
+    // 核心作用是在多线程并发等待某个初始化或同步事件时，允许等待线程不仅能通过“正常倒计时归零”被唤醒，还能在发生异常、错误或中断时，被提前释放并主动抛出关联的异常。
+    // 统一异常广播：当后台初始化失败或发生致命错误时，可以通过 releaseAwait 注入异常，所有正在调用 awaitOrException 阻塞等待的线程都会收到该异常，从而避免线程无限期挂起或忽略错误。
     public static class ExceptionAwareCountDownLatch extends CountDownLatch {
         /* The environment that may need to be invalidated. */
         final EnvironmentImpl envImpl;

@@ -38,6 +38,8 @@ import com.sleepycat.util.keyrange.RangeCursor;
  * be used by other BDB JE packages but that are not part of the public API
  * available to applications.
  */
+// 内部包桥梁（Internal Bridge）：DbInternal 专门用于“庇护”那些必须设为 public（以便 BDB JE 其他内部包可以访问），但不属于公开给应用程序的公共 API 的方法。
+// 代理模式（Proxy Pattern）：它充当了公共类（如 Environment、Database、Cursor 等）与底层内部实现类（如 EnvironmentImpl、DatabaseImpl、CursorImpl 等）之间的访问代理，打破了包访问权限的限制，同时将复杂的内部逻辑对外部应用屏蔽。
 public class DbInternal {
 
     public static OperationResult DEFAULT_RESULT =

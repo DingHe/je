@@ -91,16 +91,21 @@ import com.sleepycat.je.utilint.StoppableThreadFactory;
  * the Election class is first instantiated.
  *
  */
-
+// 整个节点选举体系的核心协调与管理类。它代表了节点运行选举的完整环境，每个复制节点（Replication Node）或 Arbiter 仅持有一个该类的实例。
+// 统一管理选举三剑客：Elections 类负责初始化、启动和生命周期管理参与选举的三个核心智能代理——Proposer（提议者）、Acceptor（接受者） 和 Learner（学习者）。
+// 驱动和协调选举流程：通过 initiateElection(...) 方法触发本地节点参与或发起新一轮基于 Paxos 协议的选主过程，并管理并发冲突、重试策略与后台选举线程。
+// 解耦通信与复制层：作为选举基础设施与上层复制（Replication）业务之间的桥梁，将复杂的底层 TCP/UDP 选举报文通信、超时及群组拓扑变化封装在模块内部，最大程度降低对复制引擎的耦合度。
 public class Elections {
 
     /* Describes all nodes of the group. */
+    // 描述当前复制组内所有节点及其 Socket 地址等拓扑结构信息的对象。
     private RepGroupImpl repGroup;
 
     /*
      * A unique identifier for this election agent. It's used by all the
      * agents that comprise Elections.
      */
+    // 当前选举代理及节点的唯一名称与 ID 组合标识。
     private final NameIdPair nameIdPair;
 
     /*
@@ -112,34 +117,44 @@ public class Elections {
      * does not initiate an election and if the node can never be a master.
      * The Arbiter uses it this way.
      */
+    // 关联的复制节点实例（可能为 null，例如 Arbiter 仲裁者节点）。
+    // 用于追踪群组成员数量和处理主节点状态变化。
     private final RepNode repNode;
-
+    // 选举模块的配置项集合。
     private final ElectionsConfig config;
-
+    // 底层复制环境的具体实现实例。
     private final RepImpl envImpl;
 
     /*
      * Shutdown can only be executed once. The shutdown field protects against
      * multiple invocations.
      */
+    // 保证关闭操作只被安全执行一次的原子布尔标志
     private final AtomicBoolean shutdown = new AtomicBoolean(false);
 
     /* The three agents involved in the elections run by this class. */
+    // Paxos 算法中负责发起提议的 Proposer 代理实例。
     private Proposer proposer;
+    // 负责接收并响应外部 Propose/Accept 请求的 Acceptor 代理实例。
     private Acceptor acceptor;
+    // 负责监听并同步集群选举结果（Chosen Value）的 Learner 代理实例。
     private Learner learner;
 
     /* The thread pool used to manage the threads used by the Proposer. */
+    // 用于管理和调度 Proposer 异步网络交互及广播任务的线程池服务（Cached Thread Pool）。
     private final ExecutorService pool;
 
     /* Components of the agents. */
+    // 由外部传入的建议值生成器，供 Acceptor 在投票时对节点进行排名和出价。
     final private Acceptor.SuggestionGenerator suggestionGenerator;
+    // 由外部传入的选举结果通知监听器，当监听到新主节点选出时被触发。
     final private Learner.Listener listener;
 
     /*
      * The protocol used to run the elections. All three agents use this
      * instance of the protocol
      */
+    // 定义选举期间所有请求/响应消息格式及操作符的文本协议实例。
     private final Protocol protocol;
 
     /*
@@ -147,20 +162,24 @@ public class Elections {
      * volatile to ensure that shutdown can perform an unsynchronized access
      * to the iv even if an election is in progress.
      */
+    // 当前正在执行选举任务的后台工作线程。使用 volatile 修饰以保证多线程可见性。
     private volatile ElectionThread electionThread = null;
 
     /* The listener used to indicate completion of an election. */
+    // 内部实现的 Learner 监听器，用于协调重试谓词（RetryPredicate）的等待与唤醒。
     private ElectionListener electionListener = null;
 
     /**
      * The timer task that re-broadcasts election results from a master. It's
      * null in unit tests.
      */
+    // 主节点定期向集群重新广播选举结果的定时器任务。
     private final RebroadcastTask rebroadcastTask;
 
     /* The number of elections that were held. */
+    // 该节点自启动以来已经举办或参与过的选举总次数（主要用于测试与统计）。
     private int nElections = 0;
-
+    // 日志记录器与格式化器（ReplicationFormatter），用于输出带有节点标识的结构化日志。
     private final Logger logger;
     private final Formatter formatter;
 
@@ -347,11 +366,14 @@ public class Elections {
      * @param maxRetries the max number of times a proposal may be retried
      * @throws InterruptedException
      */
+    // RepGroupImpl newGroup  表示发起本次选举时所采用的复制组最新拓扑结构定义。它包含了组内所有成员节点的配置、ID、角色以及 Socket 地址。方法内部会首先用它来更新本地的群组视图并校验节点白名单。
+    // QuorumPolicy quorumPolicy 指定本次选举达成共识所需的法定人数策略（例如简单多数派 SIMPLE_MAJORITY 等）。Proposer 在第一阶段和第二阶段收集票数时，会依据该策略来判断当前赞成票是否已达到法定要求。
+    // int maxRetries 指定提议失败时的最大重试次数。如果在选举过程中遇到网络波动、票数不足或与其他并发提议冲突，Proposer 可以进行重试的上限次数。
     public synchronized void initiateElection(RepGroupImpl newGroup,
                                               QuorumPolicy quorumPolicy,
                                               int maxRetries)
         throws InterruptedException {
-
+        // 更新本地的复制组拓扑引用，并将最新的选举成员 ID 列表同步注册到底层通信协议（Protocol）中，确保只接受合法群组成员的消息。
         updateRepGroup(newGroup);
         long startTime = System.currentTimeMillis();
         nElections++;
@@ -462,6 +484,7 @@ public class Elections {
      *
      * @param newRepGroup defines the new group
      */
+    // 更新本地的复制组拓扑引用，并将最新的选举成员 ID 列表同步注册到底层通信协议（Protocol）中，确保只接受合法群组成员的消息。
     public void updateRepGroup(RepGroupImpl newRepGroup) {
         repGroup = newRepGroup;
         protocol.updateNodeIds(newRepGroup.getAllElectionMemberIds());
@@ -642,6 +665,8 @@ public class Elections {
     /**
      * Implements the retry policy
      */
+    // 具体实现选举失败后的重试策略。当 Proposer 的一轮选主提议失败时，
+    // 该类负责控制重试次数、计算非线性指数退避休眠时间、在等待期间监听是否有其他选举完成，并在重试达到一定阈值时尝试激活仲裁或主节点机制。
     static class RetryPredicate implements Proposer.RetryPredicate {
         private final RepNode repNode;
         private final int maxRetries;
@@ -728,16 +753,20 @@ public class Elections {
      * it has successfully had its proposal accepted and after it has informed
      * all learners, or if it gives up after some number of retries.
      */
+    // 异步执行选主流程：在独立的线程生命周期中运行 Paxos 协议的两阶段提议过程（调用 proposer.issueProposal(...)），避免阻塞调用方的常规业务线程。
+    // 通告选举结果：一旦成功赢得选举并得出获胜提案（WinningProposal），该线程会负责将结果广播并通知给集群中的所有学习者（Learners）。
     private class ElectionThread extends StoppableThread {
-
+        // 本次选举所采用的法定人数策略（如简单多数派策略），用于指导 Proposer 判断票数是否达标。
         final private QuorumPolicy quorumPolicy;
 
         /* Non-null on termination if a proposal was issued and accepted. */
+        // 存储选举成功后的胜利提案对象（包含获胜提案编号、选出的 Master 价值及统计指标）。在选举顺利完成并终止时非空。
         Proposer.WinningProposal winningProposal;
 
         /* Non-null at termination if no proposal was accepted. */
+        // 存储当选举重试次数耗尽且未能成功选主时抛出的异常对象。在因重试耗尽而终止时非空。
         MaxRetriesException maxRetriesException;
-
+        // 重试策略谓词实例，用于控制提议失败时的退避等待、重试次数及中断检查。
         final private RetryPredicate retryPredicate;
 
         private ElectionThread(QuorumPolicy quorumPolicy,
@@ -754,11 +783,15 @@ public class Elections {
          * uncaught exception will invalidate the environment if this is
          * being executed on behalf of a replicated node.
          */
+        // 后台选举工作线程的主执行函数。
+        // 负责串联起 Paxos 两阶段提议、胜选结果广播以及异常和生命周期收尾
         @Override
         public void run() {
             try {
                 LoggerUtils.logMsg(logger, envImpl, formatter, Level.INFO,
                                    "Started election thread " + new Date());
+                // 正式发起并运行两阶段 Paxos 选主共识算法
+                // 若选举成功，会返回一个封装了获胜提案编号、获胜共识值（Master 归属）以及统计指标组的 WinningProposal 对象，并将其赋值给成员变量 winningProposal。
                 winningProposal =
                     proposer.issueProposal(quorumPolicy, retryPredicate);
 
@@ -771,6 +804,8 @@ public class Elections {
                  * adding sensitivity to potentially longer network delays in
                  * communicating with secondary nodes.
                  */
+                // 向集群广播并通告选举结果 (Learner 通知)
+                // 当本地节点成功赢得选举（即上一步拿到了 winningProposal）后，通过该静态方法向复制组内的所有学习者（Learner）广播选主成功的喜讯。
                 Learner.informLearners(repGroup.getAllLearnerSockets(),
                                        winningProposal,
                                        protocol,
@@ -779,16 +814,19 @@ public class Elections {
                                        config.getRepImpl(),
                                        null);
             } catch (MaxRetriesException mre) {
+            // 如果在 issueProposal 过程中因为网络波动、法定人数不够或与其他并发选举冲突导致重试次数耗尽，就会捕获到该异常。
                 maxRetriesException = mre;
                 LoggerUtils.logMsg(logger, envImpl, formatter, Level.INFO,
                                    "Exiting election after " +
                                    retryPredicate.retries() + " retries");
                 return;
             } catch (InterruptedException e) {
+            // 当外部调用线程中断（如节点在关闭过程中发起了打断信号）时触发。
                 pool.shutdownNow();
                 LoggerUtils.logMsg(logger, envImpl, formatter, Level.INFO,
                                    "Election thread interrupted");
             } catch (Exception e) {
+                // 捕获在选举或通知过程中任何其他未预料到的运行时异常。
                 saveShutdownException(e);
             } finally {
                 cleanup();

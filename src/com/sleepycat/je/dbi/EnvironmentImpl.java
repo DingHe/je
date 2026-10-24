@@ -155,6 +155,11 @@ import com.sleepycat.je.utilint.VLSN;
  * Underlying Environment implementation. There is a single instance for any
  * database environment opened by the application.
  */
+// 最核心的底层环境实现类
+// 核心作用体现在：
+// 数据库环境的控制中心（Hub）：当应用程序调用 new Environment(...) 时，底层会且仅会创建一个对应的 EnvironmentImpl 实例。它统筹管理整个环境生命周期中的所有底层服务。
+// 核心子系统与守护线程的管理者：它负责初始化和持有数据库所有的核心基础设施，包括日志管理器（LogManager）、文件管理器（FileManager）、事务管理器（TxnManager）、内存预算控制（MemoryBudget）、数据库映射树（DbTree）以及各类后台守护线程（如检查点线程 Checkpointer、驱逐线程 Evictor、清理线程 Cleaner、压缩线程 INCompressor 等）。
+// 实现配置观察者：实现了 EnvConfigObserver 接口，能够实时监听和响应环境中可变配置参数的动态修改。
 public class EnvironmentImpl implements EnvConfigObserver {
 
     /*
@@ -164,81 +169,130 @@ public class EnvironmentImpl implements EnvConfigObserver {
     private static final boolean TEST_NO_LOCKING_MODE = false;
 
     /* Attributes of the entire environment */
+    // 环境的当前运行状态（通过 DbEnvState 枚举维护）
     private volatile DbEnvState envState;
+    // 布尔标志，指示环境是否已经开始关闭流程。
     private volatile boolean closing;// true if close has begun
+    // 表示该数据库环境根目录的 File 对象。
     private final File envHome;
+    // 分别统计当前打开的环境句柄数和正在进行的备份数。
     private final AtomicInteger openCount = new AtomicInteger(0);
     // count of open environment handles
     private final AtomicInteger backupCount = new AtomicInteger(0);
     // count of in-progress dbBackup
+    // 是否启用事务
     private boolean isTransactional; // true if env opened with DB_INIT_TRANS
+    // 是否无锁模式
     private boolean isNoLocking;     // true if env has no locking
+    // 是否只读
     private boolean isReadOnly;   // true if env opened with the read only flag.
+    // 是否纯内存日志
     private boolean isMemOnly;       // true if je.log.memOnly=true
+    // 是否共享缓存等
     private boolean sharedCache;     // true if je.sharedCache=true
     /* true if offset tracking should be used for deferred write dbs. */
+    // 指示是否针对延迟写入（Deferred-Write）数据库启用偏移量追踪和数据逐出（Database-wide eviction）策略。
+    // 当其为 true 时，允许对延迟写入数据库中的记录进行精细化的内存驱逐管理。
     private boolean dbEviction;
+    // 指示是否对堆外内存（Off-Heap Cache）中的数据块启用校验和（Checksum）验证，以确保堆外缓存数据的完整性和安全性。
     private boolean useOffHeapChecksums;
+    // 指示当前环境中是否启用了记录过期（TTL - Time-To-Live）功能。
     private boolean expirationEnabled;
+    // 用于控制在某些异常、日志转储或调试上下文中，是否允许暴露用户的实际业务数据（User Data）。
     private boolean exposeUserData;
-
+    // 指示是否允许执行盲操作（Blind Operations，即在没有预先读取旧记录或没有完整 B 树路径上下文的情况下直接执行修改/更新）
     private boolean allowBlindOps = false;
+    // 示是否允许执行盲写入（Blind Puts，通常用于 BIN Delta 优化），即在不把完整的旧叶节点读入内存进行对比的情况下，直接向 BIN 提交增量修改。
     private boolean allowBlindPuts = false;
-
+    // 指定叶节点（LN - Leaf Node）内联存储的最大字节数。
+    // 如果记录小于该大小，则直接内联存储在 B 树的 BIN（Bottom Internal Node）中，从而减少随机磁盘寻址。默认值为 -1（表示使用系统默认策略）。
     private int maxEmbeddedLN = -1;
-
+    // 默认缓存模式
     private CacheMode cacheMode;
 
     /* Whether or not initialization succeeded. */
+    // 用于精确追踪当前环境的初始化流程是否已经完全成功执行完毕。
     private boolean initializedSuccessfully = false;
 
     /*
      * Represents whether this environment needs to be converted from
      * standalone to replicated.
      */
+    // 指示当前的独立存储环境（Standalone Environment）是否需要被转换为高可用复制环境（Replicated Environment）
     protected boolean needRepConvert = false;
-
+    // 内存预算控制器实例。它是 JE 内存管理的核心，负责监控 JVM 堆内存、堆外内存的使用情况，并协同 Evictor（驱逐器）动态调整缓存大小，确保数据库不会超出配置的内存限制。
     private MemoryBudget memoryBudget;
+    // 定义了计算 Adler-32 校验和时的分块大小（Chunk Size）。通过将大数据块切分为固定大小的块进行计算，平衡 CPU 消耗与吞吐量。
     private static int adler32ChunkSize;
 
     /* Save so we don't have to look it up in the config manager frequently. */
+    // 锁等待超时时间（以毫秒或微秒为单位）。作为性能优化缓存保存在此处，避免每次加锁时都需要去 configManager 中重复查找，提升高并发下的执行效率。
     private long lockTimeout;
+    // 事务超时时间。同样作为本地缓存保存，当事务运行超过该时间限制时会被自动中止
     private long txnTimeout;
 
     /* Deadlock detection. */
+    // 布尔标志。指示是否启用死锁检测机制。
     private boolean deadlockDetection;
+    // 死锁检测的延迟时间间隔。控制后台线程进行死锁扫描的频率。
     private long deadlockDetectionDelay;
 
     /* Directory of databases */
+    // 数据库映射树（DbTree）。
+    // 它是 JE 的元数据核心，负责管理当前环境中所有用户数据库（Database）的根节点指针、ID 映射以及它们在日志中的存储位置。
     protected DbTree dbMapTree;
+    // 记录映射树（DbMapTree）根节点在日志文件中的物理位置（Log Sequence Number, LSN）。
+    // 初始值为 DbLsn.NULL_LSN，在恢复或检查点时会被更新。
     private long mapTreeRootLsn = DbLsn.NULL_LSN;
+    // 专用于保护 DbMapTree 根节点访问的排他锁（Latch）。在多线程并发访问或修改数据库元数据时提供线程安全保证。
     private final Latch mapTreeRootLatch;
-
+    // 内存内部节点列表（INList）。用于追踪和管理当前所有已经被加载到 JVM 内存中的 B 树内部节点（Internal Nodes, IN）。
+    // 它是驱逐器（Evictor）和检查点机制高效定位内存节点的重要数据结构。
     private final INList inMemoryINs;
 
     /* Services */
+    // 配置管理器。负责统一存储、读取和管理当前环境的所有配置参数（包括常规环境参数和复制参数）。它是 JE 内部各子系统查询配置值的核心来源。
     protected DbConfigManager configManager;
+    // 配置观察者列表。存储所有实现了 EnvConfigObserver 接口的组件引用。当环境的可变配置（Mutable Config）在运行时发生动态调整时，系统会遍历该列表并逐一回调通知这些观察者，实现参数的“热更新”。
     private final List<EnvConfigObserver> configObservers;
+    // 环境专用日志记录器。
+    // JE 的日志系统为每个数据库环境实例单独维护一个 Logger 实例，用于记录该环境运行过程中的诊断信息、警告、错误以及调试日志。
     protected final Logger envLogger;
+    // 日志管理器。JE 的核心组件之一，
+    // 负责将所有数据库变更（如记录插入、更新、删除、事务提交等）序列化并写入日志文件，同时负责在运行时从磁盘或日志缓冲区中检索/读取日志项。
     private final LogManager logManager;
+    // 日志刷盘器。负责协调和管理日志缓冲区的刷新机制，确保内存中的日志数据按需（同步或异步）持久化刷入磁盘，以保障事务的持久性（Durability）。
     private final LogFlusher logFlusher;
+    // 数据验证器。用于对数据库中的数据、记录或 B 树结构进行完整性检查与校验，确保数据在存储和读取过程中没有发生损坏。
     private final DataVerifier dataVerifier;
+    // 文件管理器。负责底层物理文件（如 .jdb 日志文件）的管理。包括文件的创建、打开、关闭、删除、重命名以及磁盘空间占用和文件号（File Number）的追踪。
     private final FileManager fileManager;
+    // 事务管理器。控制和维护环境中所有事务的生命周期（如事务的开启、提交、中止），追踪活跃事务列表，并与底层的锁机制（Lock Manager）协同工作，确保 ACID 特性。
     private final TxnManager txnManager;
+    // 统计管理器。负责收集、聚合和管理整个环境运行过程中的各类性能统计指标（如吞吐量、缓存命中率、操作计数等），供管理员监控或通过 Environment.getStats() 接口查询。
     protected final StatManager statManager;
 
     /* Daemons */
+    // 缓存驱逐器（Evictor）。负责监控 JE 的 JVM 内存使用量。
+    // 当内存占用超过配置的预算阈值（Memory Budget）时，后台驱逐线程会主动运行，将冷数据的 B 树内部节点（IN）从内存中释放/逐出，防止发生 OutOfMemoryError。
     private final Evictor evictor;
+    // 堆外内存缓存（Off-Heap Cache）控制器。管理 JE 申请的堆外内存存储空间，优化大数据量下的缓存性能，减少 JVM 垃圾回收（GC）压力。
     private final OffHeapCache offHeapCache;
+    // 内部节点压缩器（INCompressor）。负责异步清理 B 树中由于记录删除而变为空的内部节点（Internal Nodes），维持 B 树结构的紧凑与高效。
     private final INCompressor inCompressor;
+    // 检查点守护线程（Checkpointer）。负责定期在后台将内存中修改过的脏数据（Dirty Nodes）同步刷入磁盘日志中，并生成检查点（Checkpoint）。这是缩短数据库崩溃恢复（Recovery）时间的核心机制。
     private final Checkpointer checkpointer;
+    // 日志清理器（Cleaner）。负责扫描磁盘上的 JE 日志文件（.jdb），识别出包含大量过期/死数据的日志文件，并在后台通过数据迁移和合并来回收磁盘空间。
     private final Cleaner cleaner;
+    // 统计捕获器（StatCapture）。负责在后台按配置的时间间隔定期捕获和记录环境的各项性能统计指标，用于性能监控与分析。
     private final StatCapture statCapture;
 
     /* Stats, debug information */
+    // 启动追踪器（StartupTracker）。用于细粒度地监控和记录数据库环境从初始化到恢复完成各个阶段（Phases）的耗时与进度，便于性能诊断与启动优化。
     protected final StartupTracker startupTracker;
 
     /* If true, call Thread.yield() at strategic points (stress test aid) */
+    // 强制让出 CPU 标志（压力测试辅助）。当该静态标志为 true 时，会在代码的关键策略点主动调用 Thread.yield()。
     private static boolean forcedYield = false;
 
     /*
@@ -250,27 +304,34 @@ public class EnvironmentImpl implements EnvConfigObserver {
      * A ReentrantReadWriteLock is used directly rather than via a SharedLatch.
      * This is because reentrancy is required but not supported by SharedLatch.
      */
+    // 二级索引关联读写锁
+    // 由 Database、SecondaryDatabase 和 Cursor 在操作期间共同使用，用于保护二级索引关联关系的变更。
+    // JE 专门使用一个全局统一的读写锁来管理所有数据库的二级关联，以防止死锁并完美支持涉及多个主数据库的复杂关联操作
     private final ReentrantReadWriteLock secondaryAssociationLock;
 
     /**
      * The exception listener for this environment, if any has been specified.
      */
+    // 异常监听器。如果应用程序通过配置指定了该监听器，当后台守护线程抛出异步异常时，系统会回调它，为应用提供捕获异步错误的通知机制。
     private ExceptionListener exceptionListener = null;
 
     /**
      * The recovery progress listener for this environment, if any has been
      * specified.
      */
+    // 恢复进度监听器。用于在数据库崩溃恢复（Recovery）阶段向应用程序实时反馈恢复的进度。
     private ProgressListener<RecoveryProgress> recoveryProgressListener = null;
 
     /**
      * ClassLoader used to load user-supplied classes by name.
      */
+    // 用于在运行时根据名称动态加载用户自定义的类（例如自定义的比较器、触发器或序列化类）
     private ClassLoader classLoader = null;
 
     /**
      * Used for duplicate database conversion.
      */
+    // 重复数据库转换预加载配置。用于处理重复键数据库（Duplicate Database）升级或转换时的预加载策略。
     private PreloadConfig dupConvertPreloadConfig = null;
 
     /*
@@ -281,14 +342,23 @@ public class EnvironmentImpl implements EnvConfigObserver {
      * while synchronized on the tracking mutex object.  The sleep mutex is
      * used to block multiple background threads while sleeping.
      */
+    // 记录当前由于超出后台 IO 限制而积压的休眠请求或节流状态，供外部或不同线程快速无锁检查。
     private volatile int backgroundSleepBacklog;
+    // 后台读操作限额（Read Limit）
     private volatile int backgroundReadLimit;
+    // 后台写操作限额（Write Limit）。
     private volatile int backgroundWriteLimit;
+    // 后台休眠间隔时间。
     private long backgroundSleepInterval;
+    // 前周期的后台读取计数。
     private int backgroundReadCount;
+    // 当前周期的后台写入字节数。
     private long backgroundWriteBytes;
+    // 主要用于 JE 内部的单元测试和回归测试
     private TestHook<?> backgroundSleepHook;
+    // 后台指标追踪互斥锁。
     private final Object backgroundTrackingMutex = new Object();
+    // 后台休眠同步锁。
     private final Object backgroundSleepMutex = new Object();
 
     /*
@@ -299,9 +369,11 @@ public class EnvironmentImpl implements EnvConfigObserver {
      * the counter.  It's static so that we don't have to pass around the
      * EnvironmentImpl.
      */
+    // ThreadLocal 激活引用计数器
     private static int threadLocalReferenceCount = 0;
 
     /* Used to prevent multiple full thread dumps. */
+    // 线程堆栈转储防重复标志。
     private boolean didFullThreadDump = false;
 
     /**
@@ -309,6 +381,7 @@ public class EnvironmentImpl implements EnvConfigObserver {
      * don't require any instantiations.  This flag, if true, indicates that
      * we've been called from DbPrintLog or a similar utility.
      */
+    // 无比较器运行模式标志。
     private boolean noComparators = false;
 
     /*
@@ -316,6 +389,8 @@ public class EnvironmentImpl implements EnvConfigObserver {
      * other java.lang.Error situations so that allocation does not need to be
      * done in the OOME context.
      */
+    // 灾难上下文预分配异常。
+    // 预先在堆外或初始化阶段创建好的异常包装器。专门用于 OOME 等极度危险的上下文环境中，避免在内存枯竭时动态 new 异常。
     private final EnvironmentFailureException preallocatedEFE =
         EnvironmentFailureException.makeJavaErrorWrapper();
 
@@ -325,6 +400,7 @@ public class EnvironmentImpl implements EnvConfigObserver {
      * an Error caused the invalidation. Contains null if the env was not
      * invalidated.
      */
+    // 环境失效异常记录器。
     private final AtomicReference<EnvironmentFailureException>
         invalidatingEFE = new AtomicReference<>();
 
@@ -332,11 +408,12 @@ public class EnvironmentImpl implements EnvConfigObserver {
      * The first EWE that occurred, or null. If this EWE was the first EFE to
      * invalidate the env, then wedgedEFE.get() == invalidatingEFE.get().
      */
+    // 环境死锁/卡死异常记录器。
     private final AtomicReference<EnvironmentWedgedException> wedgedEFE =
         new AtomicReference<>();
-
+    // Adler-32 校验算法实现选择开关。
     public static final boolean USE_JAVA5_ADLER32;
-
+    // 定义了一个系统属性名称常量 "je.disable.java.adler32"。
     private static final String DISABLE_JAVA_ADLER32_NAME =
         "je.disable.java.adler32";
 
@@ -354,9 +431,11 @@ public class EnvironmentImpl implements EnvConfigObserver {
      */
 
     /* The property name of setting these two MBeans. */
+    // 用于标识和配置 JE 数据库环境的 JMX 监控注册属性名称。
     private static final String REGISTER_MONITOR = "JEMonitor";
 
     /* The two MBeans registered or not. */
+    // MBean 注册状态标志。
     private volatile boolean isMBeanRegistered = false;
 
     /*
@@ -368,9 +447,12 @@ public class EnvironmentImpl implements EnvConfigObserver {
      * Note that handlers are not statically attached to loggers. See
      * LoggerUtils.java for information on how redirect loggers are used.
      */
+    // JE 信息日志文件名常量（"je.info"），通常用于在环境目录下生成滚动日志文件。
     private static final String INFO_FILES = "je.info";
+    // 日志文件大小与数量限制。
     private static final int FILEHANDLER_LIMIT = 10000000;
     private static final int FILEHANDLER_COUNT = 10;
+    // 控制台与文件日志处理器实例。分别负责将诊断日志输出到标准错误/控制台以及磁盘上的 je.info 滚动日志文件中。
     private final ConsoleHandler consoleHandler;
     private final FileHandler fileHandler;
 
@@ -378,11 +460,14 @@ public class EnvironmentImpl implements EnvConfigObserver {
      * A Handler that was specified by the application through
      * EnvironmentConfig
      */
+    // 应用自定义日志处理器。
     private final Handler configuredHandler;
     /* cache this value as a performance optimization. */
+    // 禁用数据库日志记录优化缓存标志。作为性能优化被缓存在此处，指示是否禁用了 JE 内部的某些数据库日志行为。
     private boolean dbLoggingDisabled;
 
     /* Formatter for java.util.logging. */
+    // 日志格式化器（Formatter）。JE 为每个环境专用的日志记录定制的文本格式化工具
     protected final Formatter formatter;
 
     /*
@@ -390,6 +475,9 @@ public class EnvironmentImpl implements EnvConfigObserver {
      * result of AutoTransactions where no environment handle is available, and
      * in all cases of triggers involving replicated environments.
      */
+    // 内部环境代理句柄。
+    // 当由于自动事务（AutoTransactions）触发了数据库触发器（Triggers）且此时没有现成的应用环境句柄可用时，或者在涉及高可用复制环境的所有触发器场景下，
+    // 系统就会使用这个预先准备好的 envInternal 作为默认句柄传递给触发器。
     protected Environment envInternal;
 
     /*
@@ -401,11 +489,13 @@ public class EnvironmentImpl implements EnvConfigObserver {
      * (has the EnvironmentImpl lock) and the stat capture thread calling
      * getStats().
      */
+    // 统计同步锁对象。
     private final Object statSynchronizer = new Object();
 
     /* Stat base key used for loadStats api */
+    // 统计基础键（Stat Base Key）。
     protected Integer statKey;
-
+    // 环境创建时间戳。
     private long creationTime;
 
     /**
@@ -413,6 +503,7 @@ public class EnvironmentImpl implements EnvConfigObserver {
      * load JEMonitor dynamically to ensure that there are no explicit
      * references to com.sleepycat.je.jmx.*.
      */
+    // MBean 动态注册器契约接口。
     public static interface MBeanRegistrar {
         public void doRegister(Environment env)
             throws Exception;
@@ -420,16 +511,22 @@ public class EnvironmentImpl implements EnvConfigObserver {
         public void doUnregister()
             throws Exception;
     }
-
+    // MBean 注册器列表。
+    // 用于存储当前环境中所有待注册的 MBean 注册器实例，支持动态注册多个监控组件。
     private final ArrayList<MBeanRegistrar> mBeanRegList =
         new ArrayList<MBeanRegistrar>();
 
     /* NodeId sequence counters */
+    // 节点 ID 序列生成与管理器。
+    // 负责为 JE 存储引擎内部的所有 B 树节点、记录节点（Node）统一分配全局唯一的节点 ID（NodeId）。它在 DbTree 创建之后被初始化，确保整个环境中的节点标识不重复。
     private final NodeSequence nodeSequence;
 
     /* Stats */
+    // 环境总体统计组（Environment Statistics Group）
     private final StatGroup envStats;
+    // B 树节点重新加锁（Relatch）次数统计
     private LongStat relatchesRequired;
+    // 吞吐量统计组（thrputStats）与 CRUD 操作计数器
     private final StatGroup thrputStats;
     private final AtomicLongStat priSearchOps;
     private final AtomicLongStat priSearchFailOps;
@@ -505,6 +602,8 @@ public class EnvironmentImpl implements EnvConfigObserver {
      *
      * @throws IllegalArgumentException via Environment ctor.
      */
+    // 最核心的初始化与启动逻辑
+    // 整个数据库环境的“出生”和组装工厂。当应用程序执行 new Environment(...) 时，底层会强制调用这个巨型构造函数。
     protected EnvironmentImpl(File envHome,
                               EnvironmentConfig envConfig,
                               EnvironmentImpl sharedCacheEnv,
@@ -1724,10 +1823,10 @@ public class EnvironmentImpl implements EnvConfigObserver {
         return (envState == DbEnvState.INVALID) ||
                (envState == DbEnvState.CLOSED);
     }
-
+    // 检查当前数据库环境是否已经进入失效（INVALID）状态；如果已经失效，则主动抛出导致该环境失效的根本原因异常（EnvironmentFailureException）。
     public void checkIfInvalid()
         throws EnvironmentFailureException {
-
+        // 如果环境状态是正常的（如 OPEN 或 INIT），则直接 return 结束方法，不产生任何开销，允许业务继续执行。只有当状态为 INVALID 时，才会往下执行错误处理逻辑。
         if (envState != DbEnvState.INVALID) {
             return;
         }
@@ -1773,6 +1872,7 @@ public class EnvironmentImpl implements EnvConfigObserver {
      * Decrements the reference count and closes the environment when it
      * reaches zero.  A checkpoint is always performed when closing.
      */
+    // 负责数据库环境的安全销毁与资源释放
     public void close()
         throws DatabaseException {
 

@@ -305,6 +305,11 @@ import com.sleepycat.je.utilint.DatabaseUtil;
  * target="_top">Replication First Steps</a>
  * @since 4.0
  */
+// ReplicatedEnvironment 是 Berkeley DB Java Edition (JE) 高可用/复制（High Availability, HA）模块中的核心类。它继承自普通单机环境类 Environment，代表复制组（Replication Group）中的一个独立节点。
+// 分布式高可用节点封装：将一个本地的数据库目录包装为一个分布式复制组中的节点（可以作为 Master 主节点、Electable 可选举 Replica 副本，或 Secondary 只读副本）。
+// 自动引导与加群（Join Group）：当实例化 ReplicatedEnvironment 时，该节点会自动与组内的其他成员（通过 Helper Hosts 辅助节点）建立联系、参与选举或同步数据。构造函数返回时，该节点已经处于可用状态。
+// 接口与操作复用：完全继承自 Environment，因此所有的数据库操作（如打开数据库、事务读写、游标操作等）与单机应用完全一致。但它要求所有涉及的复制数据库必须是事务型的（Transactional）。
+// 支持非复制数据库：允许在复制环境中创建非复制数据库（Non-replicated Databases），用于本地持久化缓存等非关键场景。
 public class ReplicatedEnvironment extends Environment {
 
     /*
@@ -316,9 +321,12 @@ public class ReplicatedEnvironment extends Environment {
      * Environment.checkOpen) and getNonNullRepImpl methods. During close, while
      * synchronized, it is safe to access it directly.
      */
+    // 指向专门用于高可用复制的底层实现类（RepImpl）。
+    // 是 EnvironmentImpl 的复制扩展子类，管理着复制节点的心跳、网络 Feeder、选举算法等底层逻辑。在调用 close() 时会被置为 null 以防止内存泄漏。
     private volatile RepImpl repEnvironmentImpl;
 
     /* The unique name and id associated with the node. */
+    // 存储当前节点的唯一名称（Name）和内部 ID（Id）对，用于在复制网络通信中标识身份。
     private final NameIdPair nameIdPair;
 
     /*
@@ -327,6 +335,7 @@ public class ReplicatedEnvironment extends Environment {
      * cloning a copy to keep it distinct from the user's instance, applying
      * je.properties settings, and validating against the underlying node.
      */
+    // 保存当前句柄所使用的复制配置（ReplicationConfig）副本（由用户传入的配置经过克隆、合并 je.properties 属性以及校验后生成）。
     private ReplicationConfig handleRepConfig;
 
     /**
@@ -544,12 +553,16 @@ public class ReplicatedEnvironment extends Environment {
     /*
      * Joins the replication group as part of the creation of a handle.
      */
+    // RepImpl repImpl 代表底层复制环境的实现对象（Replication Implementation）。它是 BDB JE 复制机制的核心控制中心，封装了节点状态机、网络通信、选举、日志同步等所有底层逻辑。
+    // ReplicaConsistencyPolicy consistencyPolicy  副本一致性策略。用于指定当本节点作为 Replica（副本）时，在允许应用程序开始读取数据之前，本地数据必须与 Master（主节点）同步到什么程度（例如允许的最大事务滞后时间或滞后 LSN 范围）
+    // QuorumPolicy initialElectionPolicy 初始选举策略。决定了节点在启动加入复制组、进行主节点选举（Master Election）时所需要的最少投票参与人数（如前面分析过的 SIMPLE_MAJORITY 或 ALL）。
     private void joinGroup(RepImpl repImpl,
                            ReplicaConsistencyPolicy consistencyPolicy,
                            QuorumPolicy initialElectionPolicy)
         throws DatabaseException {
 
         /* Just return if we don't want to join the group. */
+        // 判断当前环境配置是否明确指示“不要加入复制组”
         if (dontJoinGroup()) {
             return;
         }
@@ -576,6 +589,8 @@ public class ReplicatedEnvironment extends Environment {
     }
 
     /* Return true if this node won't join the group. */
+
+    // 返回该节点是否配置加入复制组，由je.rep.dontJoinRepGroup控制
     private boolean dontJoinGroup() {
         return new Boolean(getRepConfig().getConfigParam
                 (RepParams.DONT_JOIN_REP_GROUP.getName()));
@@ -592,6 +607,14 @@ public class ReplicatedEnvironment extends Environment {
      * @param envImplParam is non-null only when used by EnvironmentIml to
      * create an InternalEnvironment.
      */
+    // Berkeley DB JE（Java Edition）分布式高可用/复制（Replication）模块中核心类 ReplicatedEnvironment 的构造函数
+    // 主要作用是初始化复制环境、加入复制组（Replication Group）、处理同步冲突（如回滚异常 RollbackException）以及触发相关的监控事件。
+    // File envHome  数据库环境的主目录（文件夹路径），存储了数据库文件、日志文件（JE Log）及复制相关的元数据。
+    // ReplicationConfig repConfig  复制专用的配置对象。包含当前节点的唯一标识（Node Name）、复制组名称、群组中其他节点的地址列表（Helper Nodes）、超时时间等网络和复制行为配置。
+    // ReplicaConsistencyPolicy consistencyPolicy  副本一致性策略。用于规定当一个 Replica 节点加入复制组并准备好接受读操作时，它必须落后主节点（Master）多少（例如在时间或事务数上）才算“一致”，从而决定当前节点何时可以对应用层提供服务。
+    // QuorumPolicy initialElectionPolicy 初始选举策略/法定人数策略（仲裁策略）。规定了在进行选举（Election）时，需要多少个节点参与才能达成法定共识（Quorum），以选出新的主节点。
+    // boolean joinGroup  控制标志。指示在创建环境句柄时是否自动尝试加入复制组。通常在正常使用时为 true；某些测试场景下可能为 false。
+    // RepImpl envImplParam  仅在由 EnvironmentImpl 派生创建内部环境时使用。平时通常为 null，由父类构造函数进行底层环境初始化。
     protected ReplicatedEnvironment(File envHome,
                                     ReplicationConfig repConfig,
                                     EnvironmentConfig envConfig,
@@ -605,19 +628,22 @@ public class ReplicatedEnvironment extends Environment {
                IllegalArgumentException {
 
         super(envHome, envConfig, repConfig, envImplParam);
-
+        // 从刚刚创建的实例中提取非空的底层环境实现对象（EnvironmentImpl）
         repEnvironmentImpl = (RepImpl) DbInternal.getNonNullEnvImpl(this);
+        // 获取当前节点的名称与唯一 ID 组合标识（NameIdPair），用于内部网络寻址和日志记录。
         nameIdPair = repEnvironmentImpl.getNameIdPair();
 
         /*
          * Ensure that the DataChannelFactory configuration is usable
          * and initialize logging state.
          */
+        // 配置并检查底层的网络通信组件（DataChannelFactory），确保配置有效，并初始化该节点用于复制通信的日志记录状态。
         repEnvironmentImpl.initializeChannelFactory();
-
+        // 判断是否需要加入复制组
         if (joinGroup) {
 
             try {
+                // 尝试加入复制组（核心逻辑）
                 joinGroup(
                     repEnvironmentImpl, consistencyPolicy,
                     initialElectionPolicy);
@@ -634,9 +660,11 @@ public class ReplicatedEnvironment extends Environment {
                  * Clear references to the old envImpl/repImpl, to prevent OOME
                  * during recovery when we retry below.
                  */
+                // 应对回滚异常：清理旧环境引用
                 DbInternal.clearEnvImpl(this);
+                // 显式清除了对旧实例的引用。
                 repEnvironmentImpl = null;
-
+                // 重新创建环境实现并重试加入
                 repEnvironmentImpl = (RepImpl) makeEnvironmentImpl(
                     envHome, envConfig, repConfig);
 
@@ -644,12 +672,13 @@ public class ReplicatedEnvironment extends Environment {
                  * Ensure that the DataChannelFactory configuration is usable
                  * and initialize logging state.
                  */
+                // 重新初始化网络通道。
                 repEnvironmentImpl.initializeChannelFactory();
-
+                // 重试加入复制组（硬恢复之后的第二次尝试）。如果这次再次失败，异常将不再捕获，直接向上抛给用户。
                 joinGroup(
                     repEnvironmentImpl, consistencyPolicy,
                     initialElectionPolicy);
-
+                // 记录这次硬恢复的相关异常上下文信息。
                 repEnvironmentImpl.setHardRecoveryInfo(e);
             }
 
@@ -657,11 +686,13 @@ public class ReplicatedEnvironment extends Environment {
              * Fire a JoinGroupEvent only when the ReplicatedEnvironment is
              * successfully created for the first time.
              */
+            // 检查是否存在有效的复制节点（RepNode），若存在则通过监控事件管理器触发 notifyJoinGroup() 事件，通知监听器（Listeners）当前节点已成功加入复制组。
             if (repEnvironmentImpl.getRepNode() != null) {
                 repEnvironmentImpl.getRepNode().
                     getMonitorEventManager().notifyJoinGroup();
             }
         } else {
+            // else 分支：测试专用校验
             /* For testing only */
             if (repEnvironmentImpl.getRepNode() != null) {
                 throw EnvironmentFailureException.unexpectedState
@@ -975,7 +1006,7 @@ public class ReplicatedEnvironment extends Environment {
         throws DatabaseException {
 
         checkOpen();
-
+        // 返回环境的配置
         return handleRepConfig;
     }
 
@@ -1047,14 +1078,16 @@ public class ReplicatedEnvironment extends Environment {
      * invalid.
      * @throws IllegalStateException if the environment is not open.
      */
+    // 核心作用是在执行复制（Replication）相关操作前，校验当前复制环境是否处于正常开启和可用状态
     private RepImpl checkOpen() {
-
+        // 如果数据库环境不正常，就抛出异常
         DbInternal.checkOpen(this);
 
         /*
          * Will throw ISE if the environment becomes closed or invalid after
          * the above check.
          */
+        //返回环境的实现
         return getNonNullRepImpl();
     }
 
@@ -1102,6 +1135,8 @@ public class ReplicatedEnvironment extends Environment {
      * <code>MASTER</code>, <code>REPLICA</code> to <code>REPLICA</code>, etc.)
      * never occur.
      */
+    // 定义复制节点的生命周期状态：State 枚举决定了应用程序当前可以对复制环境（ReplicatedEnvironment）执行哪些操作（如读或写）
+    // 控制应用行为分流：通过该状态，应用程序可以准确知道当前节点是处于主节点（MASTER）、副本节点（REPLICA）、过渡状态（UNKNOWN）还是断开状态（DETACHED），从而决定是将写请求路由到本地还是转发给 Master，或者暂停写操作。
     public static enum State {
 
         /**
@@ -1109,6 +1144,8 @@ public class ReplicatedEnvironment extends Environment {
          * closed. No operations can be performed on the environment when it is
          * in this state.
          */
+        // 表示节点未与复制组关联，其环境句柄已被关闭。
+        // 当处于此状态时，无法在环境中执行任何数据库操作。
         DETACHED,
 
         /**
@@ -1118,6 +1155,8 @@ public class ReplicatedEnvironment extends Environment {
          * on its environment. In a functioning group, this state is
          * transitory.
          */
+        // 表示节点当前未与主节点取得联系，但正在积极尝试连接或参与选举以决定主节点。
+        // 在此状态下，节点仅被限制执行读操作。在正常运行的复制组中，这通常是一个短暂的过渡状态。
         UNKNOWN,
 
         /**
@@ -1127,6 +1166,7 @@ public class ReplicatedEnvironment extends Environment {
          * start processing application level write requests in addition to
          * read requests.
          */
+        // 表示当前节点是复制组中唯一的主节点。
         MASTER,
 
         /**
@@ -1137,6 +1177,7 @@ public class ReplicatedEnvironment extends Environment {
          * environment. It must arrange for all write requests to be routed to
          * the master.
          */
+        // 表示当前节点是正在由主节点进行更新的副本节点
         REPLICA;
 
         /**

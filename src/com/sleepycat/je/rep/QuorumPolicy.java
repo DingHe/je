@@ -26,16 +26,25 @@ import com.sleepycat.je.EnvironmentFailureException;
  * <p>Note that {@link NodeType#SECONDARY} nodes are not counted as part of
  * master election quorums.
  */
+// QuorumPolicy 是 Berkeley DB Java Edition (BDB JE) 高可用复制（Replication）模块中的核心枚举类。
+// 决定选举仲裁策略（Quorum Policy）：QuorumPolicy 用于定义在复制组（Replication Group）进行主节点选举（Master Election）时，必须有多少个节点参与并投票才能选出赢家（即新的主节点）
+// 防止脑裂（Split-Brain）：通过设定法定人数的阈值，确保在网络分区或节点故障时，只有获得足够多数派同意的子网才能选出主节点，从而保证数据一致性。
+// 节点启动配置：复制组在生命周期中默认使用 QuorumPolicy.SIMPLE_MAJORITY。应用程序通常仅在节点启动时（通过 ReplicatedEnvironment 构造函数）需要显式指定特定的法定人数策略。
+// 注意事项：NodeType#SECONDARY（辅助/次要节点）不计入主节点选举的法定人数中。
 public enum QuorumPolicy {
 
     /**
      * All participants are required to vote.
      */
+    // 全员投票策略。
+    // 要求复制组中的所有投票参与者都必须参与投票并达成一致。这种策略对节点存活率要求极高（只要有一个节点挂掉就无法选出主节点），通常用于对可用性要求不高、但对强一致性或特定测试场景有要求的环境。
     ALL,
 
      /**
       *  A simple majority of participants is required to vote.
       */
+    // 简单多数派投票策略（默认策略）
+    // 要求复制组中必须有简单多数的参与者投票（即超过半数）。这是生产环境中推荐的经典高可用策略，能够容忍少数节点故障的同时保证系统继续提供服务。
     SIMPLE_MAJORITY;
 
     /**

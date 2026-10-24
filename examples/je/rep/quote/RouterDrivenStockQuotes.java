@@ -96,8 +96,12 @@ import java.net.Socket;
  *
  * @see HARouter
  */
+// RouterDrivenStockQuotes 是 Berkeley DB Java Edition (JE) 高可用复制模块中的路由驱动型股票报价节点示例程序。它继承自基础的 StockQuotes 类。
+// 核心作用体现在：
+// 结合外部智能路由器（HARouter）实现请求自动导向：与 StockQuotes 不同，此类自身不再提供本地控制台交互界面。它通过在专用端口上监听来自 HARouter 的网络请求，实现对读写请求的自动化分配与处理。
+// 完美演示负载均衡与高可用架构解耦：展示了如何在实际生产环境中将“路由/负载均衡层”（由 HARouter 担任）与“数据存储计算层”（由 RouterDrivenStockQuotes 节点集群担任）进行解耦，使后端节点专注于高可用数据服务的支撑。
 public class RouterDrivenStockQuotes extends StockQuotes {
-
+    // 负责初始化高可用复制环境配置参数
     RouterDrivenStockQuotes(String[] params) throws Exception {
         super(params);
     }
@@ -107,6 +111,7 @@ public class RouterDrivenStockQuotes extends StockQuotes {
      * socket connection established by the router instead of prompting the
      * user for console input.
      */
+    // 废弃了本地控制台输入，转而通过启动 ServerSocket 在专用应用端口上监听并处理来自 HARouter 路由器的网络文本请求
     @Override
     void doWork()
         throws IOException, InterruptedException {
@@ -115,11 +120,14 @@ public class RouterDrivenStockQuotes extends StockQuotes {
          * Get socket address on which it can be contacted with requests by
          * the Router.
          */
+        // 计算应用端口并启动 ServerSocket
+        // 计算出当前节点专用的应用监听地址（即底层复制端口号 + 100 偏移量），并基于此端口创建 ServerSocket。
         InetSocketAddress appSocketAddress =
             HARouter.getAppSocketAddress(repEnv.getRepConfig().
                                          getNodeSocketAddress());
         final ServerSocket serverSocket =
             new ServerSocket(appSocketAddress.getPort());
+        // 打印就绪日志
         System.err.println("Node: " + repEnv.getNodeName() +
                            " joined replication group: " +
                            repEnv.getGroup().getName() +
@@ -128,6 +136,7 @@ public class RouterDrivenStockQuotes extends StockQuotes {
                            " ready to service Router requests at: " +
                            serverSocket + "\n");
         try {
+            // 循环监听与请求分发
             for (boolean done = false; !done;) {
  
                 Socket socket = null;
@@ -135,14 +144,17 @@ public class RouterDrivenStockQuotes extends StockQuotes {
                 PrintStream out = null;
 
                 try {
+                    // 阻塞等待并接受来自 HARouter 的客户端 Socket 连接。
                     socket = serverSocket.accept();
-
+                    // 读取路由器发过来的命令文本。
                     in = new BufferedReader
                         (new InputStreamReader(socket.getInputStream()));
 
                     String line = getCommandLine(null,
                                                  socket.getInputStream());
+
                     out = new PrintStream(socket.getOutputStream(), true);
+                    // 执行相应的读写命令（若是写请求且当前是 Replica 则会返回错误提示，由路由器返回给客户端
                     done = doCommand(line, out);
                 } finally {
                     QuoteUtil.closeSocketAndStreams(socket, in, out);

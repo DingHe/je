@@ -52,6 +52,10 @@ import com.sleepycat.je.dbi.EnvironmentImpl;
  * Note that the StoppableThread.cleanup must be invoked upon, or soon after,
  * thread exit.
  */
+// 所有可控终止的后台守护线程的抽象基类。它继承自 Java 的 Thread 类，主要用于替代传统的任务队列式 DaemonThread。
+// 统一的生命周期与守护属性管理：强制所有子类线程默认设置为 JVM 守护线程（Daemon），避免因为后台线程未退出而导致应用程序无法正常关闭。
+// 规范的异常处理与环境失效机制：自动为线程注册未捕获异常处理器（UncaughtExceptionHandler）。一旦后台线程发生未捕获的异常，能够自动记录日志、通知 JE 异常监听器，并将对应的数据库环境标记为失效（Invalidate），防止错误数据扩散。
+// 分阶段的优雅关闭（Soft Shutdown & Hard Interruption）：提供了一套标准且强健的线程停止机制（软关闭、中断、超时等待、线程转储及卡死异常抛出），确保数据库在关闭时所有后台线程都能安全释放资源。
 public abstract class StoppableThread extends Thread {
 
     /* The environment, if any, that's associated with this thread. */

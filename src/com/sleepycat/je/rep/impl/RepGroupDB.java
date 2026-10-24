@@ -94,11 +94,20 @@ import com.sleepycat.je.utilint.VLSN;
  * An instance of this class is created as part of a replication node and is
  * retained for the entire lifetime of that node.
  */
+// 负责封装和管理复制组（RepGroup）中所有与成员关系（Group Membership）相关的底层数据库交互
+// 由于 JE 支持动态群组管理（Dynamic Group Membership，即允许在运行时动态添加、删除或更新复制组内的节点），所有对群组成员的读写、修改、持久化以及两阶段提交（Two-Phase Update）协议，都必须通过该类提供的 API 来完成。
+// 类的核心作用
+// 持久化复制组元数据：在每一个复制环境中，都会存在一个内部隐藏的复制组数据库。该数据库存储了两类核心数据：
+// 全局组信息：以特殊的 GROUP_KEY 作为键，存储整个复制组的元数据（如组名、格式版本号、当前变更版本号等）。
+// 节点成员信息：以节点的名称（String）作为键，存储对应的序列化节点对象（RepNodeImpl）。
+// 并发控制与死锁防范：由于主节点（Master）处理写请求、从节点（Replica）重放复制流，以及查询操作（如 getGroup()）会并发进行，该类严格规定了按键升序访问的规则（特别是 GROUP_KEY 永远是最小的键并会被优先加锁），以此避免死锁。
+// 两阶段成员更新（Two-Phase Member Update）：实现了节点加入/更新的安全保障协议，确保多数派（Quorum）达成一致。
 public class RepGroupDB {
-
+    // 持有底层复制实现核心对象的引用，用于获取配置管理器、节点 ID 对、数据库实例等。
     private final RepImpl repImpl;
 
     /* A convenient, cached empty group. */
+    // 缓存的一个便捷的空群组对象，初始化时即生成，供无数据库或特定初始化场景使用。
     public final RepGroupImpl emptyGroup;
 
     private final Logger logger;
@@ -167,12 +176,17 @@ public class RepGroupDB {
      * created.
      * @throws DatabaseException
      */
+    // 初始化复制组数据库的管理对象
+    // 这个构造函数被调用时，底层的数据库句柄（Database Handle）并没有被立即初始化。
+    // 因为在创建复制节点（以及该 RepGroupDB 实例）的早期阶段，当前节点究竟是主节点（Master）还是从节点（Replica）尚未确定
     public RepGroupDB(RepImpl repImpl)
         throws DatabaseException {
 
         this.repImpl = repImpl;
-
+        // 用于后续读取复制相关的系统配置参数（例如通过 GROUP_NAME 获取当前复制组的名称）
         DbConfigManager configManager = repImpl.getConfigManager();
+        // configManager.get(GROUP_NAME)：从配置中读取群组的名称。
+        // 获取当前 JE 引擎的版本号。
         emptyGroup = new RepGroupImpl(configManager.get(GROUP_NAME),
                                       repImpl.getCurrentJEVersion());
         logger = LoggerUtils.getLogger(getClass());

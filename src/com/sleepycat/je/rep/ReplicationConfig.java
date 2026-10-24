@@ -74,6 +74,13 @@ import com.sleepycat.je.rep.utilint.RepUtils;
  * to date as properties are changed, and does not reflect property validation
  * or properties that are computed.
  */
+// ReplicationConfig 类的核心作用
+// 管理不可变复制属性：定义了如复制组名称 (groupName)、节点名称 (nodeName)、节点类型 (nodeType)、节点网络地址 (nodeHostPort) 等在环境生命周期内不能更改的关键参数。
+// 继承与扩展：继承自 ReplicationMutableConfig，因此它既包含自身不可变的配置，也能管理所有运行时的可变复制配置。同时它实现了 RepConfigProxy 接口，以便在非 HA 的底层核心代码（dbi）中传递复制配置。
+// 优先级规则：
+// 优先级最高：<environmentHome>/je.properties 文件中指定的配置。
+// 其次：在创建 ReplicatedEnvironment 时通过 ReplicationConfig 对象传入的配置。
+// 最低：系统默认值。
 public class ReplicationConfig extends ReplicationMutableConfig
     implements RepConfigProxy {
 
@@ -102,6 +109,7 @@ public class ReplicationConfig extends ReplicationMutableConfig
      * @see ReplicationConfig#setGroupName
      * @see ReplicationConfig#getGroupName
      */
+    // 复制组的名称。只能包含字母、数字、连字符、下划线或句点。集群中的所有节点必须属于同一个复制组。
     public static final String GROUP_NAME =
         EnvironmentParams.REP_PARAM_PREFIX + "groupName";
 
@@ -128,6 +136,7 @@ public class ReplicationConfig extends ReplicationMutableConfig
      * @see ReplicationConfig#setNodeName
      * @see ReplicationConfig#getNodeName
      */
+    // 当前节点在复制组中的唯一标识名称。
     public static final String NODE_NAME =
         EnvironmentParams.REP_PARAM_PREFIX + "nodeName";
 
@@ -146,6 +155,7 @@ public class ReplicationConfig extends ReplicationMutableConfig
      * @see ReplicationConfig#setNodeType
      * @see ReplicationConfig#getNodeType
      */
+    // 当前节点的类型（如可选举节点、只读节点、仲裁者等）。
     public static final String NODE_TYPE =
         EnvironmentParams.REP_PARAM_PREFIX + "nodeType";
 
@@ -168,6 +178,7 @@ public class ReplicationConfig extends ReplicationMutableConfig
      * @see ReplicationConfig#getHelperHosts
      * @deprecated replaced by {@link ReplicationMutableConfig#HELPER_HOSTS}.
      */
+    // 辅助节点的主机与端口列表，供新节点加入集群时寻址。
     @Deprecated
     public static final String HELPER_HOSTS =
         EnvironmentParams.REP_PARAM_PREFIX + "helperHosts";
@@ -187,6 +198,7 @@ public class ReplicationConfig extends ReplicationMutableConfig
      * </tr>
      * </table></p>
      */
+    // 复制通信所使用的默认 TCP 端口。
     public static final String DEFAULT_PORT =
         EnvironmentParams.REP_PARAM_PREFIX + "defaultPort";
 
@@ -216,6 +228,7 @@ public class ReplicationConfig extends ReplicationMutableConfig
      * @see ReplicationConfig#setNodeHostPort
      * @see ReplicationConfig#getNodeHostPort
      */
+    // 当前节点的主机名和端口（格式为 hostname:port），持久化保存在复制组元数据中。切勿在生产环境多机部署时使用默认的 localhost。
     public static final String NODE_HOST_PORT =
         EnvironmentParams.REP_PARAM_PREFIX + "nodeHostPort";
 
@@ -243,6 +256,7 @@ public class ReplicationConfig extends ReplicationMutableConfig
      * </table>
      * </p>
      */
+    // 若设为 true，HA 套接字将绑定到 INADDR_ANY，使 HA 服务在所有网络接口上可用；默认只绑定到 NODE_HOST_PORT 指定的特定接口。
     public static final String BIND_INADDR_ANY =
         EnvironmentParams.REP_PARAM_PREFIX + "bindInaddrAny";
 
@@ -284,6 +298,7 @@ public class ReplicationConfig extends ReplicationMutableConfig
      * @see <a href="../EnvironmentConfig.html#timeDuration">Time Duration
      * Properties</a>
      */
+    // Replica 节点的默认一致性策略（如允许最大时间滞后和超时时间）。
     public static final String CONSISTENCY_POLICY =
         EnvironmentParams.REP_PARAM_PREFIX + "consistencyPolicy";
 
@@ -295,6 +310,7 @@ public class ReplicationConfig extends ReplicationMutableConfig
      * However, this param is still used when some, but not all, nodes in a
      * group have been upgraded to 7.5 or later.
      */
+    // 重放（Replay）事务在等待锁时的最大超时时间。
     public static final String REP_STREAM_TIMEOUT =
         EnvironmentParams.REP_PARAM_PREFIX + "repStreamTimeout";
 

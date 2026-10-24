@@ -18,6 +18,8 @@ package com.sleepycat.je.rep.net;
  * objects for use with dynamically constructed network objects.  Instances
  * of this interface are provided during object instantiation.
  */
+// 网络组件的日志抽象工厂：LoggerFactory 接口的主要作用是为动态构建的网络对象（Dynamically constructed network objects）提供获取日志记录器（Logging objects）的机制。
+// 解耦与插件化支持：在 BDB JE 的复制网络层中（例如自定义的 Socket 工厂、连接通道或安全传输层），网络对象往往是通过配置动态实例化的。通过引入 LoggerFactory 接口，这些动态网络组件能够在实例化时获得一个统一的日志记录方式，而无需硬编码依赖底层的日志实现，从而增强了网络层的灵活性、可测试性和可扩展性。
 public interface LoggerFactory {
 
     /**

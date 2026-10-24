@@ -26,21 +26,28 @@ import com.sleepycat.je.rep.utilint.BinaryProtocol;
  * The public name and internal id pair used to uniquely identify a node
  * within a replication group.
  */
+// 唯一标识复制节点（Replication Node Identifier）：在 BDB JE 的复制集群中，每个节点既拥有一个人类可读、由应用程序分配的名称（Name），又拥有一个系统内部生成的紧凑整型 ID（ID）。
+// NameIdPair 将这两者绑定在一起，用于在复制组（Replication Group）内唯一且安全地标识一个节点。
+// 支持多种序列化协议：提供了针对网络传输（ByteBuffer / BinaryProtocol）和本地存储（TupleInput / TupleOutput）的序列化与反序列化支持。
+// 预定义特殊状态常量：内置了 NULL（未知节点 ID）和 NOCHECK（用于绕过群组检查）等常量，方便处理生命周期中尚未分配 ID 或特殊校验的场景。
 public class NameIdPair implements Serializable {
     private static final long serialVersionUID = 1L;
-
+    // 应用程序为复制节点指定的名称（如 "node1"），在对象的生命周期中不可更改。
     private final String name;
+    // 内部生成的紧凑整型节点 ID（Node ID）。
     private int id;
 
     /* Constant to denote an unknown NODE_ID */
+    // 常量，用于表示未知的或空的节点 ID。
     public final static int NULL_NODE_ID = -1;
 
     /* The node ID used to bypass group membership checks. */
+    // 常量，用于绕过群组归属检查（Group Membership Checks）的特殊节点 ID。
     public static final int NOCHECK_NODE_ID = Integer.MIN_VALUE;
-
+    // 预定义的只读静态实例，名称为 "NullNode"，ID 为 NULL_NODE_ID。
     public static final NameIdPair NULL =
         new ReadOnlyNameIdPair("NullNode", NameIdPair.NULL_NODE_ID);
-
+    // 预定义的只读静态实例，名称为 "NoCheckNode"，ID 为 NOCHECK_NODE_ID。
     public static final NameIdPair NOCHECK =
         new ReadOnlyNameIdPair("NoCheckNode", NOCHECK_NODE_ID);
 
