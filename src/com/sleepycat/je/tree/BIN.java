@@ -166,8 +166,12 @@ import com.sleepycat.je.utilint.VLSN;
  * possible, or mutating the delta to a full BIN by calling
  * BIN.mutateToFullBIN().
  */
+// 最底层的关键节点类——BIN（Bottom Internal Node，底层内部节点）。它是直接连接和管理用户实际记录（Leaf Nodes / LNs）的桥梁。
+// 管理用户记录（LN）指针：其槽位（Slots）中存储的键（Keys）和目标（Targets）直接指向实际存储用户数据的叶子节点（LN）或其他底层数据。
+// BIN-deltas（增量日志）机制：为了大幅减少磁盘写入量并优化内存，当 BIN 只有少部分槽位被修改（“脏”槽位 $\le 25\%$）时，系统允许只记录和持久化被修改的部分（称为 BIN-delta），从而避免每次都写整个全量 BIN。
+// 高级特性托管：集成了分布式复制所需的 VLSN 缓存、数据生存时间（TTL / Expiration）追踪、堆外内存缓存（Off-Heap Cache）映射以及并发数据库游标（Cursors）的精确跟踪与调整。
 public class BIN extends IN {
-
+    // XML 调试或转储（Dump）时标志 BIN 节点开始的标签字符串。
     private static final String BEGIN_TAG = "<bin>";
     private static final String END_TAG = "</bin>";
 
@@ -179,6 +183,7 @@ public class BIN extends IN {
      * allowSparseRep is false because all slots have log sizes and less
      * mutation is better.
      */
+    // 用于 lastLoggedSizes 字段的初始空状态表示（单例）。最小长度设为 1，不使用稀疏表示（因为大多数槽位最终都需要记录日志大小）。
     private static final INLongRep.EmptyRep EMPTY_LAST_LOGGED_SIZES =
         new INLongRep.EmptyRep(1, false);
 
@@ -194,6 +199,7 @@ public class BIN extends IN {
      * allowSparseRep is false because either all slots typically have VLSNs,
      * or none do, and less mutation is better.
      */
+    // 用于 vlsnCache 字段的初始空状态表示。最小长度为 5（适应快速增长的 VLSN）。
     private static final INLongRep.EmptyRep EMPTY_VLSNS =
         new INLongRep.EmptyRep(5, false);
 
@@ -205,6 +211,7 @@ public class BIN extends IN {
      * allowSparseRep is true because some workloads will only load LN IDs for
      * a subset of the LNs in the BIN.
      */
+    // 用于 offHeapLNIds 的初始空表示。最小长为 8（64位指针），允许稀疏表示（因为只有部分 LN 会被加载到堆外缓存）。
     private static final INLongRep.EmptyRep EMPTY_OFFHEAP_LN_IDS =
         new INLongRep.EmptyRep(8, true);
 
@@ -217,6 +224,7 @@ public class BIN extends IN {
      * allowSparseRep is true because some workloads only set TTLs on some of
      * the LNs in a BIN.
      */
+    // 用于 expirationValues（TTL 过期时间）的初始空表示。最小长为 1，允许稀疏表示（并非所有记录都有过期时间）。
     private static final INLongRep.EmptyRep EMPTY_EXPIRATION =
         new INLongRep.EmptyRep(1, true);
 
@@ -224,6 +232,7 @@ public class BIN extends IN {
      * The set of cursors that are currently referring to this BIN.
      * This field is set to null when there are no cursors on this BIN.
      */
+    // 当前正在引用此 BIN 的数据库游标（Cursor）集合。当 BIN 发生分裂或合并时，必须通过该集合调整游标位置。
     private TinyHashSet<CursorImpl> cursorSet;
 
     /*
@@ -235,6 +244,7 @@ public class BIN extends IN {
      * in the full version of the BIN. This is a persistent field for
      * BIN-delta logrecs only, and for log versions >= 10.
      */
+    // 如果当前内存对象是一个 BIN-delta（增量），该字段记录其对应的完整全量 BIN 的条目总数（日志版本 $\ge 10$ 时持久化）。
     private int fullBinNEntries = -1;
 
     /*
@@ -242,6 +252,7 @@ public class BIN extends IN {
      * entries (capacity) in the full version of the BIN. This is a
      * persistent field for BIN-delta logrecs only, and for log versions >= 10.
      */
+    // 如果当前是 BIN-delta，记录完整全量 BIN 的最大容量（Fanout）。
     private int fullBinMaxEntries = -1;
 
     /*
@@ -253,11 +264,13 @@ public class BIN extends IN {
      * This is a persistent field for BIN-delta logrecs only, and for log
      * versions >= 10.
      */
+    // BIN-delta 的布隆过滤器（Bloom Filter），用于快速判断某个键是否在全量 BIN 的“干净（clean）”槽位中，从而支持盲写优化（Blind Put）。
     byte[] bloomFilter;
 
     /*
      * See comment in IN.java, right after the lastFullVersion data field.
      */
+    // 记录上一次生成或写入该 Delta 的 LSN 版本。
     private long lastDeltaVersion = DbLsn.NULL_LSN;
 
     /*
@@ -277,6 +290,7 @@ public class BIN extends IN {
      * value.  The cache will remain empty if LNs are never evicted or version
      * caching is not configured, which is always the case for standalone JE.
      */
+    // 缓存槽位对应的 VLSN（版本/复制序列号）数组，主要在 LN 被驱逐出内存后用于复制追溯。
     private INLongRep vlsnCache = EMPTY_VLSNS;
 
     /*
@@ -287,13 +301,16 @@ public class BIN extends IN {
      * INLongRep will store the minimum number of bytes. An EMPTY_REP is
      * used initially until the need arises to add a non-zero value.
      */
+    // 记录每个 LN 最近一次写入日志时的字节大小，用于在更新或删除时准确计算回收的废弃空间（Obsolete counting）。
     private INLongRep lastLoggedSizes = EMPTY_LAST_LOGGED_SIZES;
 
     /**
      * When some LNs are in the off-heap cache, the offHeapLruId is this BIN's
      * index in the off-heap LRU list.
      */
+    // 当 LN 存放在堆外内存缓存时，记录其在堆外 LRU 列表中的内存指针 ID。
     private INLongRep offHeapLNIds = EMPTY_OFFHEAP_LN_IDS;
+    // 当前 BIN 在堆外 LRU 链表中的索引位置。
     private int offHeapLruId = -1;
 
     /**
@@ -303,13 +320,16 @@ public class BIN extends IN {
      * greater than the actual offset to be added. The base is the smallest
      * non-zero offset that has been encountered.
      */
+    // 记录每个槽位记录的 TTL 过期时间偏移量。
     private INLongRep expirationValues = EMPTY_EXPIRATION;
+    // TTL 过期时间计算的基准天数/小时数。
     private int expirationBase = -1;
 
     /**
      * Can be set to true by tests to prevent last logged sizes from being
      * stored.
      */
+    // TTL 过期时间计算的基准天数/小时数。
     public static boolean TEST_NO_LAST_LOGGED_SIZES = false;
 
     public BIN() {
@@ -421,21 +441,29 @@ public class BIN extends IN {
      * is critical that getVLSN returns the VLSN for a resident LN before
      * getting the VLSN from the cache.
      */
+    // 获取记录复制序列号（VLSN，Version/Replicated Log Sequence Number）的核心方法
+    // 在主从复制（High Availability）环境中，每一个用户写入的数据记录（LN）都会被赋予一个单调递增的 VLSN。为了在节点内存受限或 LN 被驱逐（Evicted）后依然能快速追溯 VLSN，JE 设计了多级缓存与回溯机制。
+    // int idx  槽位索引（Slot Index）。指定要获取当前 BIN 中哪一个槽位记录的 VLSN。
+    // boolean allowFetch  是否允许从磁盘抓取（Fetch）。如果为 false，当内存或各级缓存中都找不到 VLSN 时，方法会直接返回空值，而不会触发代价高昂的磁盘 I/O。
+    // CacheMode cacheMode 当确实需要从磁盘加载数据时，该参数控制加载过程中的缓存行为（例如是否将加载的节点保持在内存中、是否受 LRU 驱逐影响等）。
     public long getVLSN(int idx, boolean allowFetch, CacheMode cacheMode) {
 
         /* Must return the VLSN from the LN, if it is resident. */
+        // 获取指定槽位指向的目标对象。如果该叶子节点（LN）当前正驻留在内存中（未被驱逐），它就会被成功获取并向下转型为 LN。
         LN ln = (LN) getTarget(idx);
         if (ln != null) {
             return ln.getVLSNSequence();
         }
 
         /* Next try the vlsnCache. */
+        // 其次尝试从 BIN 本地 VLSN 缓存中获取
         long vlsn = getCachedVLSN(idx);
         if (!VLSN.isNull(vlsn)) {
             return vlsn;
         }
 
         /* Next try the off-heap cache. */
+        // 再次尝试从堆外内存缓存（Off-Heap Cache）中获取
         final OffHeapCache ohCache = getOffHeapCache();
         if (ohCache.isEnabled()) {
 
@@ -447,10 +475,11 @@ public class BIN extends IN {
         }
 
         /* As the last resort, fetch the LN if fetching is allowed. */
+        // 检查抓取权限与嵌入式 LN 边界
         if (!allowFetch || isEmbeddedLN(idx)) {
             return vlsn;
         }
-
+        // 从磁盘抓取 LN
         ln = fetchLN(idx, cacheMode);
         if (ln != null) {
             return ln.getVLSNSequence();

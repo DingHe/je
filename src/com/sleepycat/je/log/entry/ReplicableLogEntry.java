@@ -52,6 +52,10 @@ import com.sleepycat.je.log.VersionedWriteLoggable;
  * will first be read into its in-memory format in the current version, and
  * then written from there to the previous format.
  */
+// 必须由所有可以被复制（Replicated）的日志条目实现。换句话说，当且仅当某条日志对应的 LogEntryType 允许复制时，该日志条目才需要实现此接口。
+// 主要职责：
+// 网络传输与滚动升级兼容：支持在主从节点版本不一致（例如主节点已升级、而副本节点尚未升级）的滚动升级（Rolling Upgrade）期间，将日志条目序列化并降级写入到较早的日志版本格式中，以便在网络中传输。
+// 版本跟踪与多版本序列化：通过记录格式变更的版本号、管理嵌入式的可写对象，以及提供带版本参数的 getSize 和 writeEntry 重载方法，确保复制流在不同版本节点间能够被正确理解和重放。
 public interface ReplicableLogEntry extends LogEntry {
 
     /**
@@ -60,6 +64,7 @@ public interface ReplicableLogEntry extends LogEntry {
      *
      * @return the log version of the most recent format change
      */
+    // 获取该日志条目最近一次格式发生改变时的日志版本号。
     int getLastFormatChange();
 
     /**
@@ -82,6 +87,7 @@ public interface ReplicableLogEntry extends LogEntry {
      * VersionedWriteLoggable. Note that this method is not intended to be
      * called outside of tests.
      */
+    // 返回该日志条目二进制数据中可能嵌入的所有版本化可写对象集合。
     Collection<VersionedWriteLoggable> getEmbeddedLoggables();
 
     /**
@@ -95,6 +101,7 @@ public interface ReplicableLogEntry extends LogEntry {
      * and not written to the log.
      * @return the number of bytes to store this entry for the log version
      */
+    // 计算并返回在指定的日志版本和传输模式下，存储该条目所需的字节数大小。
     int getSize(int logVersion, boolean forReplication);
 
     /**
@@ -108,6 +115,7 @@ public interface ReplicableLogEntry extends LogEntry {
      * and not written to the log.
      * @param logVersion the log version
      */
+    // 将当前对象序列化到指定的缓冲区中，但使用指定的早期日志版本格式。
     void writeEntry(ByteBuffer logBuffer,
                     int logVersion,
                     boolean forReplication);
@@ -116,6 +124,7 @@ public interface ReplicableLogEntry extends LogEntry {
      * Returns whether this format has a variant that is optimized for
      * replication.
      */
+    // 判断当前日志格式是否存在一个专为复制进行了优化的变体格式。
     boolean hasReplicationFormat();
 
     /**
@@ -133,6 +142,7 @@ public interface ReplicableLogEntry extends LogEntry {
      * @param srcVersion the log version of entry in logBuffer.
      * @param destVersion the version that would be used for re-serialization.
      */
+    // 评估将现有的日志条目反序列化并重新序列化为复制优化格式是否值得（即是否有性能收益）。
     boolean isReplicationFormatWorthwhile(ByteBuffer logBuffer,
                                           int srcVersion,
                                           int destVersion);

@@ -141,15 +141,30 @@ import com.sleepycat.je.utilint.VLSN;
  * example) that consider a slot deleted when KD is set.  Since KD is rarely
  * set currently, this shouldn't have a noticeable performance impact.
  */
+// IN 是 JE 数据库中 B 树内部节点（Internal Node） 的核心实现类，继承自 Node
+// JE 内存中 B 树索引结构的中枢。整个数据库的索引体系由多层 IN（上层内部节点）和底层的 BIN（Bottom Internal Node，底层内部节点）共同构成。
+// 主要职责：
+// 索引槽管理：维护 B 树槽位（Slots），包含键（Keys）、子节点指针/目标（Targets）、LSN 记录以及状态标志（States）
+// 并发与锁控制：为每个内部节点提供独立的共享/排他锁（SharedLatch），保障多线程并发访问和修改 B 树时的线程安全。
+// 内存与缓存管理：跟踪节点内存占用、支持驱逐（Eviction）机制，并与 LRU 策略深度集成。
+// 状态标志维护：处理诸如脏数据标记（Dirty）、根节点状态、BIN Delta 优化以及删除标志（KD 和 PD）等底层状态。
+// PD (PendingDelete，待删除)： 在所有被删除的 LN（叶子节点）条目上设置，甚至在 LN 提交之前就会设置。作为一种事务上正确（Transactionally correct）的权威指示，表明某个 LN 已被删除。如果关联的事务中止（Abort），PD 会被清除。
+// KD (KnownDeleted，已知删除)：在特殊条件下设置，用于包含已知过时 LN 的条目（不用于活动/未提交的事务）。
 public class IN extends Node implements Comparable<IN>, LatchContext {
-
+    // 用于在生成内部节点（IN）的字符串表示或进行调试日志转储（Dump）时作为起始标签，方便在日志或控制台中结构化识别一个 IN 节点区域。
     private static final String BEGIN_TAG = "<in>";
     private static final String END_TAG = "</in>";
+    // 用作 B 树内部节点发生分裂（Split）操作时的调试追踪前缀。当节点因数据填满而分裂时，系统会输出带有该前缀的日志记录轨迹。
     private static final String TRACE_SPLIT = "Split:";
+    // 用作 B 树内部节点执行删除操作时的调试追踪前缀，便于排查树结构变动。
     private static final String TRACE_DELETE = "Delete:";
-
+    // 代表在紧凑 LSN 表示法中，每个 LSN 条目固定占用 4 个字节。其中 1 个字节用于存储文件号偏移，剩余 3 个字节用于存储文件内的字节偏移量。
     private static final int BYTES_PER_LSN_ENTRY = 4;
+    // 3 个字节能够表示的最大文件偏移量。因为最高值 0xffffff 被用作特殊哨兵值（见下一条），所以最大允许偏移量为 0xfffffe。
+    // 如果某个 LSN 的文件偏移量超过了此限制，紧凑的字节数组表示就会自动变异（Mutate）为标准的 long[] 数组表示。
     public static final int MAX_FILE_OFFSET = 0xfffffe;
+    // 代表 3 字节的“负一”（即 -1 的补码形式）。在紧凑 LSN 数组中，如果某个槽位没有有效的 LSN（即对应 DbLsn.NULL_LSN），
+    // 系统就会将这 3 个字节的偏移量区域设为 0xffffff，以此作为空 LSN 的占位哨兵值。
     private static final int THREE_BYTE_NEGATIVE_ONE = 0xffffff;
 
     /**
@@ -170,53 +185,79 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
      * The main tree has levels in the 0x10000 -> 0x1ffff number space.
      * The duplicate tree levels are in 0-> 0xffff number space.
      */
+    // 映射树（Mapping Tree）的层级命名空间起点。映射树的层级数字全部落在 0x20000 到 0x2ffff 的区间内，用于管理数据库自身的元数据映射。
     public static final int DBMAP_LEVEL = 0x20000;
+    // 主数据树（Main Tree）的层级命名空间起点。普通用户数据库的主 B 树层级全部落在 0x10000 到 0x1ffff 的区间内。
     public static final int MAIN_LEVEL = 0x10000;
+    // 层级掩码。通过将节点的完整 level 与 LEVEL_MASK 进行按位与（&）运算（即 getNormalizedLevel()），可以剥离树类型的高位标识（如 MAIN_LEVEL 或 DBMAP_LEVEL），
+    // 提取出纯粹的数值层级（例如获取归一化后的树高）。
     public static final int LEVEL_MASK = 0x0ffff;
+    // 最小层级边界值，通常用作越界检查或特殊未初始化状态的标记。
     public static final int MIN_LEVEL = -1;
+    // 底层内部节点（BIN）在主树中的标准层级。这表明 BIN 永远位于主树的第 1 层（紧邻叶子节点 LN 的上方）。
     public static final int BIN_LEVEL = MAIN_LEVEL | 1;
 
     /* Used to indicate that an exact match was found in findEntry. */
+    // 用于指示在 B 树节点的 findEntry 查找方法中，找到了与目标键完全匹配（Exact Match）的记录。
     public static final int EXACT_MATCH = (1 << 16);
 
     /* Used to indicate that an insert was successful. */
+    // 用于指示记录插入操作成功完成。
     public static final int INSERT_SUCCESS = (1 << 17);
 
     /*
      * A bit flag set in the return value of partialEviction() to indicate
      * whether the IN is evictable or not.
      */
+    // 指示当前 IN 节点是否可被驱逐（Evictable）。
     public static final long NON_EVICTABLE_IN = (1L << 62);
 
     /*
      * Boolean properties of an IN, encoded as bits inside the flags
      * data member.
      */
+    // 脏数据标志。指示该内部节点已被修改（变脏），其内存中的内容尚未刷写到磁盘日志中。
     private static final int IN_DIRTY_BIT = 0x1;
+    // 脏数据标志。指示该内部节点已被修改（变脏），其内存中的内容尚未刷写到磁盘日志中。
     private static final int IN_RECALC_TOGGLE_BIT = 0x2;
+    // 根节点标志。指示当前内部节点是否为该 B 树的根节点（Root）。
     private static final int IN_IS_ROOT_BIT = 0x4;
+    // 含有缓存子节点标志。指示当前 IN 节点下方是否有子节点（如下层 IN 或 BIN）当前驻留在内存缓存中。
     private static final int IN_HAS_CACHED_CHILDREN_BIT = 0x8;
+    // 二级 LRU 优先级标志。用于优化内存驱逐器（Evictor）中的 LRU 链表编排，赋予其特定的优先级。
     private static final int IN_PRI2_LRU_BIT = 0x10;
+    // 二级 LRU 优先级标志。用于优化内存驱逐器（Evictor）中的 LRU 链表编排，赋予其特定的优先级。
     private static final int IN_DELTA_BIT = 0x20;
+    // 二级 LRU 优先级标志。用于优化内存驱逐器（Evictor）中的 LRU 链表编排，赋予其特定的优先级。
     private static final int IN_FETCHED_COLD_BIT = 0x40;
+    // 堆外冷数据加载标志。配合上一个标志使用，专门指示该冷节点是从堆外缓存（Off-Heap Cache）加载到主缓存中的。
     private static final int IN_FETCHED_COLD_OFFHEAP_BIT = 0x80;
+    // 常驻内存标志。指示该节点当前处于内存常驻状态。
     private static final int IN_RESIDENT_BIT = 0x100;
+    // 禁止下一次 Delta 标志。用于控制优化策略，禁止该 BIN 在下一次修改时退化为 Delta 记录，强制写全量日志。
     private static final int IN_PROHIBIT_NEXT_DELTA_BIT = 0x200;
+    // 过期时间单位标志。指示该节点内部记录的 TTL（Time-To-Live）过期时间是以“小时”为单位进行计量的。
     private static final int IN_EXPIRATION_IN_HOURS = 0x400;
 
     /* Tracing for LRU-related ops */
+    // 过期时间单位标志。指示该节点内部记录的 TTL（Time-To-Live）过期时间是以“小时”为单位进行计量的。
     private static final boolean traceLRU = false;
+    // 控制是否开启 BIN-delta 变体演进与合并操作的日志追踪。默认关闭。
     private static final boolean traceDeltas = false;
     private static final Level traceLevel = Level.INFO;
 
     DatabaseImpl databaseImpl;
-
+    // 节点在 B 树中所处的层级（Level / Height）。
+    // 标明了该节点距离叶子节点的远近。例如，紧邻叶子节点的底层内部节点（BIN）层级为 1，上层 IN 会逐层递增。通过这个字段，B 树在进行导航、分裂或合并时可以严格校验上下级父子关系的合法性。
     private int level;
 
     /* The unique id of this node. */
+    // 节点的唯一标识符（Node ID）。
     long nodeId;
 
     /* Some bits are persistent and some are not, see serialize. */
+    // 状态标志位掩码（Bitmask）。
+    // 定义的那些二进制掩码（如 IN_DIRTY_BIT、IN_IS_ROOT_BIT 等），该整型字段将十几种布尔状态紧凑地压缩在单个变量中。
     int flags;
 
     /*
@@ -225,10 +266,14 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
      * zero make this no longer true.  It is always equal to some key in the
      * IN, and therefore it is changed by BIN.compress when removing slots.
      */
+    //
     private byte[] identifierKey;
-
+    // 当前节点中实际包含的有效条目（槽位/Slots）数量。
+    // 内部节点管理着多个子节点指针或键值对槽位。nEntries 记录了当前已使用的槽位总数，它随数据的插入而增加，随删除和压缩而减少，是遍历节点槽位时的边界控制依据。
     int nEntries;
-
+    // 槽位状态字节数组（Entry States）。
+    // entryStates 为每一个槽位单独分配一个字节，
+    // 用于记录该槽位上的特定标志（例如前面注释中提到的待删除 PD、已知删除 KD，或者其他与记录嵌入、TTL 相关的槽位级控制位）。
     byte[] entryStates;
 
     /*
@@ -244,7 +289,10 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
      * is turned on in the slot's state. This saves the space overhead of
      * using the two-part key format.
      */
+    // 管理当前节点中所有槽位的键（Keys）或键后缀。
+    // 如果没有启用前缀压缩，它存储完整的键；如果启用了前缀压缩，它仅存储键的后缀。
     INKeyRep entryKeys;
+    // 存储当前节点所有键共用的前缀（Key Prefix）。
     byte[] keyPrefix;
 
     /*
@@ -270,9 +318,14 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
      * if needed, but in the current implementation, the reverse mutation
      * (from long to compact) never takes place.
      */
+    // 基准文件号。
     long baseFileNumber;
+    // 紧凑型 LSN 字节数组。
+    // 初始状态下默认使用此数组，每个 LSN 固定占用 4 个字节。其中第 1 个字节存储相对于 baseFileNumber 的文件号偏移（支持最大 127 的差值），其余 3 个字节存储文件内偏移量。
     byte[] entryLsnByteArray;
+    // 标准长整型 LSN 数组。
     long[] entryLsnLongArray;
+    // 禁用紧凑 LSN 开关。
     public static boolean disableCompactLsns; // DbCacheSize only
 
     /*
@@ -281,13 +334,17 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
      * represent the entries. The representation can mutate as modifications
      * are made to it.
      */
+    // 管理当前 IN 节点的所有子节点引用（Targets）。
+    // 只有那些当前实际驻留在内存缓存中的子节点才会拥有非空的引用条目，未加载的子节点对应位置为空（null）。
     INTargetRep entryTargets;
 
     /*
      * In a level 2 IN, the LRU IDs of the child BINs.
      */
+    // 在二级 IN 节点（Level 2 IN）中，用于记录其子 BIN（底层内部节点）在堆外缓存（Off-Heap Cache）中的 LRU 列表索引。
+    // 当主缓存内存紧张时，部分 BIN 可能会被移到堆外缓存。二级 IN 通过该字段追踪这些堆外子 BIN 的状态和标识，初始时指向前文提到的空占位符 EMPTY_OFFHEAP_BIN_IDS。
     private INLongRep offHeapBINIds = EMPTY_OFFHEAP_BIN_IDS;
-
+    // 记录当前 IN 节点在内存中实际占用的字节大小。
     long inMemorySize;
 
     /*
@@ -295,6 +352,7 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
      * MemoryBudget.ACCUMULATED_LIMIT we inform the MemoryBudget that a change
      * has occurred.  See SR 12273.
      */
+    // 累积的内存预算变动差值。
     private int accumulatedDelta = 0;
 
     /*
@@ -303,6 +361,8 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
      * updateXXXMemoryBudget() into one call.  Not declared final so that the
      * unit tests can modify it.  See SR 12273.
      */
+    // 内存累积变动的触发阈值。
+    // 一旦 accumulatedDelta 超过了这个限制（默认 1000 字节），节点就会向全局 MemoryBudget 发送一次批量更新通知，随后将 delta 清零。
     public static final int ACCUMULATED_LIMIT_DEFAULT = 1000;
     public static int ACCUMULATED_LIMIT = ACCUMULATED_LIMIT_DEFAULT;
 
@@ -312,6 +372,8 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
      * the front/back of an LRUList, prevLRUNode/nextLRUNode will point to
      * the node itself.
      */
+    // 用于将内存中的 B 树节点串联成 LRU 驱逐链表。
+    // LRU（最近最少使用）双向链表的前后指针。
     private IN nextLRUNode = null;
     private IN prevLRUNode = null;
 
@@ -340,6 +402,7 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
      * lsn of L. This is why its read/write is managed by the INLogEntry class
      * rather than the IN readFromLog/writeFromLog methods.
      */
+    // 记录该 IN 实例最近一次写入的完整版本日志记录的 LSN。
     long lastFullVersion = DbLsn.NULL_LSN;
 
     /*
@@ -376,15 +439,16 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
      * A sequence of obsolete info that cannot be counted as obsolete until an
      * ancestor IN is logged non-provisionally.
      */
+    // 当节点中的某些旧记录或数据变旧时，它们本应被标记为过时（Obsolete）以便空间清理器（Cleaner）回收。
     private PackedObsoleteInfo provisionalObsolete;
-
+    // 重复键转换需求标志。
     /* See convertDupKeys. */
     private boolean needDupKeyConversion;
-
+    // 重复键转换需求标志。
     private int pinCount = 0;
-
+    // 节点的并发控制锁（Shared Latch）。
     private SharedLatch latch;
-
+    // 指向 B 树中父节点的引用指针。
     private IN parent;
 
     private TestHook fetchINHook;
@@ -1102,6 +1166,7 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
      * @return true if the idx'th entry is deleted for sure.  If a transaction
      * performed the deletion, it has been committed.
      */
+    // 核心作用是检查指定槽位（Slot）上的记录是否已被“确认为删除状态（Known Deleted，简称 KD 状态）”（例如通过已提交的事务所执行的删除）。
     public final boolean isEntryKnownDeleted(int idx) {
         return ((entryStates[idx] & EntryStates.KNOWN_DELETED_BIT) != 0);
     }
@@ -1174,7 +1239,10 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
     /**
      * Return true if the LN at the given slot is embedded.
      */
+    // 检查指定槽位（Slot）上的叶子节点（LN，Leaf Node）数据是否是以“嵌入式（Embedded）”方式直接存储在内存节点内部的。
     public final boolean isEmbeddedLN(int idx) {
+        // entryStates[idx] 访问 IN 节点中的 entryStates 字节数组。该数组为每个槽位单独分配了一个字节（Byte），用于记录该槽位上的各种控制状态标志位。这里通过索引 idx 获取目标槽位的状态字节。
+        // & EntryStates.EMBEDDED_LN_BIT： 执行按位与（Bitwise AND）操作。EntryStates.EMBEDDED_LN_BIT 是一个预定义的二进制掩码（Bitmask），对应状态字节中的某一个特定比特位。
         return ((entryStates[idx] & EntryStates.EMBEDDED_LN_BIT) != 0);
     }
 
@@ -1408,9 +1476,13 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
     /*
      * Convenience wrapper for setKey() method below
      */
+    // 核心作用是在向某个槽位插入键和数据时提供便利包装，并在特定边界条件（如节点重新获得第一个有效条目）时正确维护节点的标识键（identifierKey）。
     private boolean insertKey(
+        // 目标槽位索引（Slot Index）。
         int idx,
+        // 待插入的键（Key）字节数组。
         byte[] key,
+        // 待插入的嵌入式数据（Embedded Data）字节数组。如果该记录没有内联数据，则传入 null 或空数组。
         byte[] data) {
 
         /*
@@ -1418,7 +1490,9 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
          * when compression removes all entries from a BIN, and then an entry
          * is inserted before the empty BIN is purged.
          */
+        // 检查当前节点的有效条目数是否正好为 1。通常在调用此方法前，条目计数器已经递增过了。这代表当前插入的是该节点恢复或新建后的第一个条目。
         if (nEntries == 1 && !isBINDelta()) {
+            // 系统会将这个新插入的 key 自动设为该节点的 identifierKey（门牌号），并通过 true 标记该节点为脏（Dirty），以确保树的路由结构正确重建。
             setIdentifierKey(key, true /*makeDirty*/);
         }
 
@@ -1490,12 +1564,15 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
      * @return true if a multi-slot change was made and the complete IN memory
      * size must be updated.
      */
+    // 主要作用是在指定的槽位（idx）上插入或更新一个键（key）以及关联的嵌入式数据（data），并在必要时动态调整键的前缀压缩（Key Prefixing）策略。
     public boolean setKey(
+        // 目标槽位索引（Slot Index），标明需要设置或更新当前 IN 节点中的哪一个槽位。
         int idx,
         byte[] key,
         byte[] data,
+        // true 表示这是一次插入操作（此时假设目标槽位原本没有有效信息）；false 表示这是一次更新操作。这个参数会直接影响前缀压缩计算的逻辑。
         boolean isInsertion) {
-
+        // 标记槽位与节点为“脏（Dirty）”
         entryStates[idx] |= EntryStates.DIRTY_BIT;
         setDirty(true);
 
@@ -1503,17 +1580,20 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
          * Only compute key prefix if prefixing is enabled and there's an
          * existing prefix.
          */
+        // 分支一：检查是否启用了前缀压缩且存在有效前缀
         if (databaseImpl.getKeyPrefixing() && keyPrefix != null) {
-
+            // 计算新键与现有前缀的公共长度
             int newPrefixLen = Key.getKeyPrefixLength(
                 keyPrefix, keyPrefix.length, key);
-
+            // 说明新键的加入导致原本的公共前缀“缩短”了（即新键无法完全匹配旧的共享前缀），此时必须触发全局的前缀重算和所有后缀的重新调整。
             if (newPrefixLen < keyPrefix.length) {
 
                 /*
                  * The new key doesn't share the current prefix, so recompute
                  * the prefix and readjust all the existing suffixes.
                  */
+                // 推导新前缀：如果是插入（isInsertion 为真），则基于旧前缀和新键创建新前缀；
+                // 如果是更新，则调用 computeKeyPrefix(idx) 重新扫描节点中的键计算前缀。
                 byte[] newPrefix = (isInsertion ?
                                     Key.createKeyPrefix(keyPrefix, key) :
                                     computeKeyPrefix(idx));
@@ -1527,7 +1607,7 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
                 return true;
 
             } else {
-
+            // 如果前缀长度未缩短（即新键完美兼容当前前缀），则无需全局重算前缀。
                 INKeyRep.Type prevRepType = entryKeys.getType();
 
                 byte[] suffix = computeKeySuffix(keyPrefix, key);
@@ -1537,15 +1617,17 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
             }
 
         } else if (keyPrefix != null) {
-
+        // 分支二：历史遗留前缀清理
             /*
              * Key prefixing has been turned off on this database, but there
              * are existing prefixes. Remove prefixes for this IN.
              */
+            // 如果当前数据库已经关闭了前缀压缩，但该节点由于历史原因仍然残留着前缀（keyPrefix != null），则传入 null 清除前缀，重新计算所有后缀，并返回 true
             recalcSuffixes(null, key, data, idx);
             return true;
 
         } else {
+        // 分支三：未启用前缀压缩的标准写入
             INKeyRep.Type oldRepType = entryKeys.getType();
             entryKeys = entryKeys.set(idx, key, data, this);
             return oldRepType != entryKeys.getType();
@@ -1749,10 +1831,16 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
      *
      * @return the idx'th LSN for this entry.
      */
+    // 主要作用是获取指定槽位（Slot）索引处关联的日志序列号（LSN，Log Sequence Number）。
+    // JE 在 LSN 的存储上采用了双模机制（Dual-Mode Storage）：为了极大地节省内存，它默认使用一种经过压缩的字节数组（entryLsnByteArray 配合基准文件号）来存储 LSN；
+    // 当数值范围超限或发生特定变更时，会动态变更为标准的 long[] 数组（entryLsnLongArray）。getLsn 方法完美地兼容了这两种存储模式。
     public final long getLsn(int idx) {
-
+        // 检查标准的长整型数组 entryLsnLongArray 是否为空。
         if (entryLsnLongArray == null) {
+            // 将槽位索引 idx 左移 2 位（即乘以 4，idx * 4）。
+            // 这表明在底层的紧凑 LSN 字节表示中，每个槽位占用固定大小的字节空间（例如 4 字节的压缩偏移量），这里计算出目标槽位在字节数组中的起始字节偏移量。
             int offset = idx << 2;
+            // 从底层的紧凑字节结构中解析出该 LSN 在日志文件中的具体字节偏移量（File Offset）。
             int fileOffset = getFileOffset(offset);
             if (fileOffset == -1) {
                 return DbLsn.NULL_LSN;
@@ -1762,6 +1850,7 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
                                      fileOffset);
             }
         } else {
+            // 标准 long[] 数组模式的分支
             return entryLsnLongArray[idx];
         }
     }
@@ -2170,21 +2259,28 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
      * <p>WARNING: This method does not update the memory budget.  The caller
      * must update the budget.</p>
      */
+    // 主要作用是将指定的子节点对象（Node）绑定到当前 IN 节点的某个具体槽位（idx）上，
+    // 同时负责维护双向的父子引用关系，并配合内存驱逐器（Evictor）动态更新上层节点的缓存状态和 LRU 链表。
+    // Node target  要设置的目标子节点对象。
     void setTarget(int idx, Node target) {
-
+        // 强制要求当前线程必须持有该 IN 节点的排他锁（Exclusive Latch / 写锁）。
+        // 修改子节点指针属于结构性写操作，必须在独占锁保护下进行，否则会引发多线程并发数据不一致。
         assert isLatchExclusiveOwner() :
             "Not latched for write " + getClass().getName() +
             " id=" + getNodeId();
-
+        // 获取该槽位原本持有的子节点引用并保存在 curChild 中
         final Node curChild = entryTargets.get(idx);
-
+        // 将新的 target 写入目标槽位。由于 INTargetRep 具备多态变异机制（如从 None 升级为 Sparse 或 Default），
+        // 这里必须用返回值重新赋值 entryTargets，以防底层表示发生动态变异（Mutation）。
         entryTargets = entryTargets.set(idx, target, this);
-
+        // 如果新设置的目标不为空，且它本身也是一个内部节点（IN），则立即调用该子节点的 setParent(this)，
+        // 将子节点的父指针明确指向当前的 IN 节点，从而保证 B 树上下级双向导航链路的完整性。
         if (target != null && target.isIN()) {
             ((IN) target).setParent(this);
         }
-
+        // 上层 IN (UIN) 的缓存状态与 LRU 维护
         if (isUpperIN()) {
+            // 分支 A：子节点被卸载/驱逐
             if (target == null) {
 
                 /*
@@ -2192,10 +2288,13 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
                  * hasCachedChildren flag to false and put it back to the
                  * LRU list.
                  */
+                // 原本确实有子节点
                 if (curChild != null &&
+                    // 之前标志位认为有缓存子节点
                     hasCachedChildrenFlag() &&
+                    // 全局重新扫描后确认当前节点下已经没有任何子节点驻留在内存中了。
                     !hasCachedChildren()) {
-
+                    // 将当前节点的“包含缓存子节点”标志置为 false。
                     setHasCachedChildrenFlag(false);
 
                     if (!isDIN()) {
@@ -2210,13 +2309,15 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
                                     " to LRU after detaching chld " +
                                     ((IN) curChild).getNodeId());
                         }
+                        // 由于该 UIN 现在变成了一个“冷节点”（没有子节点在内存中），它需要被重新挂载回内存驱逐器（Evictor）的 LRU 链表中，以便将来在内存压力大时被进一步清理或驱逐。
                         getEvictor().addBack(this);
                     }
                 }
             } else {
+            // 分支 B：子节点被加载/附加 (target != null)
                 if (curChild == null &&
                     !hasCachedChildrenFlag()) {
-
+                    // 将标志位更新为 true，代表当前节点下开始有子节点驻留内存。
                     setHasCachedChildrenFlag(true);
 
                     if (traceLRU) {
@@ -2293,12 +2394,18 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
     /**
      * Provides the implementation of the above two methods.
      */
+    // 无锁抓取/加载子 IN 节点
+    // 在 B+树向下检索或遍历时，如果父节点（this）在内存中找不到子节点的内存对象（即子节点被驱逐了），就需要通过该方法将子节点从堆外缓存（Off-Heap Cache）或磁盘日志（Log）中加载到内存中。为了避免在漫长的 I/O 读盘期间死死按住父节点的锁不放（那样会严重阻塞并发读写），
+    // 该方法巧妙地实现了“临时释放父节点锁（Unlatch） $\rightarrow$ 读盘/物化 $\rightarrow$ 重新加锁并进行并发一致性校验”的复杂并发控制流。
     private IN fetchINWithNoLatch(
+        // 子节点在当前父 IN 节点中的槽位索引（Index）
         int idx,
+        // 子节点在当前父 IN 节点中的槽位索引（Index）
         byte [] searchKey,
+        // 搜索结果回填对象（用于记录最终命中的索引位置）。
         SearchResult result,
         CacheMode cacheMode) {
-
+        // 断言当前节点必须是上层内部节点（isUpperIN()），且当前线程必须持有该父节点的排他锁（isLatchOwner()）。
         assert(isUpperIN());
         assert(isLatchOwner());
 
@@ -2307,11 +2414,11 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
 
         boolean isMiss = false;
         boolean success = false;
-
+        // 检查子节点是否已在内存中
         IN child = (IN)entryTargets.get(idx);
 
         if (child == null) {
-
+            // 则提取该槽位记录的磁盘 LSN。若 LSN 为空（NULL_LSN），说明树结构异常，直接抛出状态异常。
             final long lsn = getLsn(idx);
 
             if (lsn == DbLsn.NULL_LSN) {
@@ -2325,20 +2432,23 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
              * (further below) to reduce the work done while latched.
              */
             byte[] ohBytes = null;
-
+            // 堆外缓存尝试：如果当前节点的级别合适（例如底层 BIN 的父级），尝试直接从堆外内存缓存（OffHeapCache）中获取该子节点的二进制字节，避免昂贵的磁盘 I/O。
             if (getNormalizedLevel() == 2) {
                 ohBytes = ohCache.getBINBytes(this, idx);
             }
-
+            // 临时释放父节点锁（Unlatch）以执行 I/O
+            // 将当前父 IN 节点临时“固定（Pin）”在内存中，防止在后续没有锁保护的间隙中被内存驱逐器（Evictor）意外释放。
             pin();
             try {
+                // 在正式从磁盘读盘或从堆外反序列化之前，主动释放当前父 IN 节点的锁。这样其他线程在此时仍然可以访问这个父节点，大幅提升了并发度。
                 releaseLatch();
 
                 TestHookExecute.doHookIfSet(fetchINHook);
-
+                // 如果堆外缓存有字节（ohBytes != null），直接在无锁状态下将其反序列化物化为 BIN 对象。
                 if (ohBytes != null) {
                     child = ohCache.materializeBIN(envImpl, ohBytes);
                 } else {
+                    // 通过日志管理器（LogManager）根据 LSN 从磁盘文件中把日志条目读上来，并解析还原出子 IN 对象。此时将 isMiss 设为 true（代表缓存未命中，发生了真实读盘）。
                     final WholeEntry wholeEntry = envImpl.getLogManager().
                         getLogEntryAllowInvisibleAtRecovery(
                             lsn, getLastLoggedSize(idx));
@@ -2349,7 +2459,7 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
 
                     isMiss = true;
                 }
-
+                // 重新对当前父 IN 节点加锁（Relatch），收回控制权。
                 latch(CacheMode.UNCHANGED);
 
                 /*
@@ -2426,6 +2536,8 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
                  * either the child would be still cached, or if it was evicted
                  * after the split, S.LSN would have changed.
                  */
+                // 为什么需要这段校验？：因为刚才父节点处于无锁状态（Unlatched），在此期间，其他并发线程可能会对这棵树进行修改、节点分裂（Split）或者更新了该槽位的 LSN。
+                // 检查当前索引、LSN 是否与刚才读盘前完全一致。如果不一致（说明在此期间树结构变了），则利用 searchKey 重新执行 findEntry 纠正索引。若超出了合法的 Key 边界，则返回 null 通知上层从根节点重试。
                 if (idx >= nEntries ||
                     getLsn(idx) != lsn ||
                     (databaseImpl.isDeferredWriteMode() &&
@@ -2744,14 +2856,18 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
     /*
      * Underlying implementation of the above fetchLNXXX methods.
      */
+    // 用于从磁盘或堆外缓存抓取（Fetch）叶子节点（LN，Leaf Node）的核心底层实现方法
+    // 当上层业务需要读取某条记录，但在 BIN 的内存槽位中发现目标节点为 null（即发生了内存缓存未命中 / Cache Miss）时，就会调用此方法将该记录从磁盘日志文件或堆外缓存中完整加载回内存。
+    // CacheMode cacheMode 缓存模式（Cache Mode）。控制抓取过程中的缓存策略（例如是否使节点变冷、是否准备被驱逐等）。
+    // boolean dupConvert 重复键转换标志。指示当前是否正处于老版本重复键数据库（Dups DB）格式转换的特殊生命周期中。
     private Node fetchLN(int idx, CacheMode cacheMode, boolean dupConvert) {
-
+        // 确保该方法只能被底层的 BIN 节点调用。
         assert(isBIN());
-
+        // 强制要求当前线程必须持有该 BIN 的排他锁（Exclusive Latch / 写锁）。因为抓取并绑定节点会修改内存结构，必须保证线程安全。
         if (!isLatchExclusiveOwner()) {
             throw unexpectedState("EX-latch not held before fetch");
         }
-
+        // 如果该槽位已经被明确标记为已知删除（isEntryKnownDeleted(idx)），说明记录已不存在，直接返回 null，无需进行后续昂贵的抓取操作。
         if (isEntryKnownDeleted(idx)) {
             return null;
         }
@@ -2760,12 +2876,13 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
         final EnvironmentImpl envImpl = getEnv();
         final OffHeapCache ohCache = envImpl.getOffHeapCache();
         boolean isMiss = false;
-
+        // 先尝试从内存中获取目标对象。
         Node child = entryTargets.get(idx);
 
         /* Fetch it from disk. */
+        // 如果内存中没有（缓存未命中），则开始执行抓取流程。
         if (child == null) {
-
+            // 获取该记录在磁盘日志中的物理位置坐标（LSN）。若 LSN 为空且未被标记删除，则抛出异常
             final long lsn = getLsn(idx);
 
             if (lsn == DbLsn.NULL_LSN) {
@@ -2777,22 +2894,25 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
              * Fetch of immediately obsolete LN not allowed. The only exception
              * is during conversion of an old-style dups DB.
              */
+            // 获取该记录在磁盘日志中的物理位置坐标（LSN）。若 LSN 为空且未被标记删除，则抛出异常
             if (isEmbeddedLN(idx) ||
                 (databaseImpl.isLNImmediatelyObsolete() && !dupConvert)) {
                 throw unexpectedState("May not fetch immediately obsolete LN");
             }
-
+            // 尝试从堆外缓存或磁盘日志加载数据
             try {
                 byte[] lnSlotKey = null;
-
+                // 尝试从堆外内存中加载该 LN
                 child = ohCache.loadLN(bin, idx, cacheMode);
 
                 if (child == null) {
+                    // 若堆外也没有，则通过日志管理器（LogManager）根据 LSN 从磁盘读取完整的日志条目（WholeEntry）。
                     final WholeEntry wholeEntry = envImpl.getLogManager().
                         getLogEntryAllowInvisibleAtRecovery(
                             lsn, getLastLoggedSize(idx));
 
                     /* Last logged size is not present before log version 9. */
+                    // 记录并更新该条目的实际日志大小
                     setLastLoggedSize(
                         idx, wholeEntry.getHeader().getEntrySize());
 
@@ -2802,7 +2922,7 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
 
                         final LNLogEntry<?> lnEntry =
                             (LNLogEntry<?>) wholeEntry.getEntry();
-
+                        // 将日志条目解析转换为内存中的 Node 对象，并将 isMiss 设为 true（代表真实的磁盘缓存未命中）。
                         lnEntry.postFetchInit(databaseImpl);
 
                         lnSlotKey = lnEntry.getKey();
@@ -2814,7 +2934,7 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
                             getEvictor().moveToPri1LRU(this);
                         }
                     }
-
+                    // 将日志条目解析转换为内存中的 Node 对象，并将 isMiss 设为 true（代表真实的磁盘缓存未命中）。
                     child = (Node) logEntry.getResolvedItem(databaseImpl);
 
                     isMiss = true;
@@ -3123,18 +3243,26 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
      * is found.  If indicateIfDuplicate is true and an exact match was found
      * then EXACT_MATCH is or'd onto the return value.
      */
+    // 最核心的导航与搜索方法
+    // 负责在当前节点内通过二分查找法（Binary Search）寻找满足条件（通常是小于等于目标键）的槽位索引。
     public final int findEntry(
+        // 要查找的目标键（Key）。
+        // 在整个比对过程中，它始终作为自定义比较器（Comparator）的左侧参数传入，允许比较器执行特殊的上下文搜索。
         byte[] key,
+        // 是否在找到精确匹配时在返回值中附加 EXACT_MATCH 标志。
         boolean indicateIfDuplicate,
+        // 是否要求精确匹配（Exact Match）
+        // 如果为 true 且未找到精确相等的键，方法将直接返回 -1；若为 false，则会返回小于目标键的最大邻近槽位（LTE，Less Than or Equal）。
         boolean exact,
+        // 自定义的键比较器。
         Comparator<byte[]> comparator) {
 
         assert idKeyIsSlotKey();
-
+        // 定义二分查找的边界。low 初始化为第 0 个槽位，high 初始化为最后一个有效槽位（nEntries - 1）。
         int high = nEntries - 1;
         int low = 0;
         int middle = 0;
-
+        // 如果外部未指定比较器，则获取并使用当前数据库实例（DatabaseImpl）默认配置的键比较器。
         if (comparator == null) {
             comparator = databaseImpl.getKeyComparator();
         }
@@ -3164,19 +3292,22 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
          * There's nothing special about the 0th key itself, only the use of
          * the 0th key in the comparison algorithm.
          */
+        // 对于上层内部节点（isUpperIN()），如果当前是非精确查找且不强调重复键（通常是自顶向下路由寻找插入路径时），
+        // 第 0 个槽位的键会被特殊对待——它在逻辑上被视为“永远小于任何查找键”。这能确保比它更小的键（例如比现有最小值还要小的键）能够正确沿着左侧路径向下路由。
         boolean entryZeroSpecialCompare =
             isUpperIN() && !exact && !indicateIfDuplicate;
 
         assert nEntries >= 0;
-
+        // 二分查找主循环
         while (low <= high) {
 
             middle = (high + low) / 2;
             int s;
-
+            // 如果当前正落在第 0 个槽位，且满足 entryZeroSpecialCompare 策略，则人为将比较结果 s 设为 1（强制认为查找键 key 大于第 0 个槽位的虚拟键），迫使二分查找向右侧收敛
             if (middle == 0 && entryZeroSpecialCompare) {
                 s = 1;
             } else {
+                // 常规比对
                 s = entryKeys.compareKeys(
                     key,  keyPrefix, middle,
                     haveEmbeddedData(middle), comparator);
@@ -3187,13 +3318,15 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
             } else if (s > 0) {
                 low = middle + 1;
             } else {
+                // 精确命中
                 int ret;
+                // 如果 indicateIfDuplicate 为真，则将 middle 与 EXACT_MATCH 掩码按位或（|）组合，标记为精确命中。
                 if (indicateIfDuplicate) {
                     ret = middle | EXACT_MATCH;
                 } else {
                     ret = middle;
                 }
-
+                // 删除检查：如果要求精确匹配（exact 为真），且发现命中的槽位已经被标记为已知删除（isEntryKnownDeleted），则视为无效匹配并返回 -1；否则返回最终计算出的组合结果 ret
                 if ((ret >= 0) && exact && isEntryKnownDeleted(ret & 0xffff)) {
                     return -1;
                 } else {
@@ -3209,6 +3342,8 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
         if (exact) {
             return -1;
         } else {
+        // 调用方允许模糊/邻近匹配（exact == false），则返回 high。
+        // 在二分查找结束后，high 指针会停留在小于等于目标键的最大槽位索引上，完美契合 JE 向下路由或范围查询的需求。
             return high;
         }
     }
@@ -4150,21 +4285,28 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
                 parent, parentIndex, grandParent, maxEntriesPerNode);
         }
     }
-
+    // 当一个 B 树节点（IN 或 BIN）因为插入的数据超过容量限制而满溢时，系统会触发该方法将当前节点一分为二（Split），并向父节点注册新的兄弟节点。
     final IN splitInternal(
+        // 当前正在分裂的节点的父 IN 节点。分裂后需要在父节点中插入新兄弟节点的指针和键。
         final IN parent,
+        // 当前节点在父节点槽位数组中的索引位置。
         final int childIndex,
+        // 当前节点的祖父节点（父节点的父节点）。在多级临时日志记录（Provisional Logging）时会用到。
         final IN grandParent,
+        // 节点的最大允许容量（Fanout / 最大条目数）。
         final int maxEntries,
+        // 指定的分裂切分点索引。如果传入负数（如 -1），则默认从正中间（nEntries / 2）切分。
         int splitIndex)
         throws DatabaseException {
-
+        // 确保当前节点不是一个被压缩的 Delta 节点，Delta 节点不能直接分裂。
         assert(!isBINDelta());
 
         /*
          * Find the index of the existing identifierKey so we know which IN
          * (new or old) to put it in.
          */
+        // 检查与查找 idKeyIndex：通过节点的 identifierKey 在当前节点中查找其所处的位置，
+        // 以便确定当前的 identifierKey 应该归属到分裂后的左半边还是右半边。
         if (identifierKey == null) {
             throw unexpectedState();
         }
@@ -4176,8 +4318,9 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
         }
 
         /* Range of entries to copy to new sibling. */
+        // 划分左右子区间 (low 与 high)
         final int low, high;
-
+        // 根据 identifierKey 所在的位置与 splitIndex 的关系，决定当前节点（this）保留哪一半，把另一半剥离给新兄弟节点：
         if (idKeyIndex < splitIndex) {
 
             /*
@@ -4195,7 +4338,8 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
             low = 0;
             high = splitIndex;
         }
-
+        // 创建新兄弟节点（New Sibling）并加锁
+        // 获取将被移动到新兄弟节点的首个键，作为新节点的标识键。
         final byte[] newIdKey = getKey(low);
         long parentLsn;
 
@@ -4206,16 +4350,19 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
          * node, which can occur when the user reduces the fanout or when this
          * node has temporarily grown beyond its original fanout.
          */
+        // 创建一个与当前节点同类型、同层级但容量适配的新 IN/BIN 节点。
         final IN newSibling = createNewInstance(
             newIdKey,
             Math.max(maxEntries, high - low + 1),
             level);
-
+        // 对新创建的兄弟节点加排他锁，确保在整个分裂期间对其独占访问。
         newSibling.latch(CacheMode.UNCHANGED);
-
+        // 迁移条目与清理原节点
+        // 压缩队列检查：如果是 BIN 节点且遇到失效条目，会顺便将新兄弟节点加入后台压缩器队列。
         try {
             boolean addedNewSiblingToCompressorQueue = false;
             final int newSiblingNEntries = (high - low);
+            // 是否有缓存子节点
             final boolean haveCachedChildren = hasCachedChildrenFlag();
 
             assert(isBIN() || haveCachedChildren == hasCachedChildren());
@@ -4225,6 +4372,8 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
             /**
              * Distribute entries among the split node and the new sibling.
              */
+            // 将原节点中 low 到 high 之间的槽位（键、LSN、子节点目标等）逐一追加（appendEntryFromOtherNode）到新兄弟节点中，
+            // 并在原节点中清除（clearEntry）这些旧槽位。
             for (int i = low; i < high; i++) {
 
                 if (!addedNewSiblingToCompressorQueue &&
@@ -4232,17 +4381,19 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
                     bin.isDefunct(i)) {
 
                     addedNewSiblingToCompressorQueue = true;
+                    // 压缩队列检查：如果是 BIN 节点且遇到失效条目，会顺便将新兄弟节点加入后台压缩器队列。
                     getEnv().addToCompressorQueue((BIN) newSibling);
                 }
 
                 newSibling.appendEntryFromOtherNode(this, i);
                 clearEntry(i);
             }
-
+            // 原节点收尾与标志调整
+            // 左移处理：如果切分是从 0 开始的（即左半部分被剥离），原节点剩余的右半部分需要向左平移（shiftEntriesLeft）以填补空缺。
             if (low == 0) {
                 shiftEntriesLeft(newSiblingNEntries);
             }
-
+            // 更新条目数与脏状态：扣减原节点的有效条目数 nEntries，并将原节点标记为脏（setDirty(true)）。
             nEntries -= newSiblingNEntries;
             setDirty(true);
 
@@ -4255,7 +4406,7 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
             assert(isBIN() ||
                    newSibling.hasCachedChildrenFlag() ==
                    newSibling.hasCachedChildren());
-
+            // 把原本指向原节点受影响区域的数据库游标（Cursors）平滑重定向或调整到正确的位置。
             adjustCursors(newSibling, low, high);
 
             /*
@@ -4263,6 +4414,7 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
              * been split.  This must be done before logging, to ensure the
              * prefix information is made persistent [#20799].
              */
+            // 重新计算前缀与后缀：分裂改变了键的分布，因此需要为原节点和新兄弟节点分别重新计算键前缀（computeKeyPrefix）和后缀。
             byte[] newKeyPrefix = computeKeyPrefix(-1);
             recalcSuffixes(newKeyPrefix, null, null, -1);
 
@@ -4270,6 +4422,7 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
             entryKeys = entryKeys.compact(this);
 
             /* Only recalc if there are multiple entries in newSibling. */
+            // 更新内存开销：由于条目减少和前缀变动，重新计算原节点的内存占用（computeMemorySize）并同步更新全局内存预算。
             if (newSibling.getNEntries() > 1) {
                 byte[] newSiblingPrefix = newSibling.computeKeyPrefix(-1);
                 newSibling.recalcSuffixes(newSiblingPrefix, null, null, -1);
@@ -4317,6 +4470,8 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
              * We prohibit compression during logging because there should be
              * at least one entry in each IN. Note the use of getKey(0) below.
              */
+            // 分裂涉及多个相关节点（新兄弟节点、原节点）。为了保证崩溃恢复时的原子性，
+            // 这里使用临时/预备日志模式（Provisional Logging）将新旧节点分别写入日志，确保它们作为一个原子单元被恢复系统处理。
             long newSiblingLsn =
                 newSibling.optionalLogProvisionalNoCompress(parent);
 
@@ -4333,6 +4488,8 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
              * <= the existing one.  See tree/SplitTest.java for more details
              * on the scenario.
              */
+            // 更新父节点槽位
+            // 根据分裂切分的方向（是左半边被剥离还是右半边被剥离），在父节点中更新原有子节点的 LSN/引用，并把新兄弟节点作为新槽位插入到父节点中（parent.insertEntry）。
             if (low == 0) {
 
                 /*
@@ -4360,7 +4517,7 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
                     newSibling, newIdKey, newSiblingLsn);
                 assert inserted;
             }
-
+            // 将新兄弟节点注册到内存 IN 列表（inMemoryINs.add）中。
             inMemoryINs.add(newSibling);
 
             /**
@@ -4368,6 +4525,8 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
              * not updated with the parent's LSN here; this is done by
              * Tree.forceSplit.
              */
+            // 记录父节点日志与 LRU 维护
+            // 记录父节点日志：将修改后的父节点写入日志（根节点使用正式日志，非根节点使用临时日志）。
             if (parent.isRoot()) {
                 parentLsn = parent.optionalLog();
             } else {
@@ -4426,20 +4585,27 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
     /**
      * Used for moving entries between BINs during splits.
      */
+    // 核心作用是在 B 树节点分裂（Split）等操作过程中，将另一个源节点（from）中指定槽位（fromIdx）的条目完整地复制或迁移追加到当前节点的末尾。
+    // IN from  源节点对象。即条目原本所在的节点（在分裂场景下，通常是被拆分的原节点 this）。
+    // int fromIdx  源节点中的槽位索引（Source Slot Index）。标明需要从源节点 from 的哪一个具体槽位提取数据并追加到当前节点。
     void appendEntryFromOtherNode(IN from, int fromIdx) {
-
+        // 确保当前节点不是一个被压缩的 Delta 节点，Delta 节点无法直接接受这种条目追加。
         assert(!isBINDelta());
-
+        // 获取源槽位上指向子节点的内存引用
         final Node target = from.entryTargets.get(fromIdx);
+        // 提取堆外 BIN 相关配置（ohBinId, ohBinPri2, ohBinDirty）：获取该条目在堆外缓存（Off-Heap Cache）中的关联标识、优先级和脏状态。
         final int ohBinId = from.getOffHeapBINId(fromIdx);
         final boolean ohBinPri2 = from.isOffHeapBINPri2(fromIdx);
         final boolean ohBinDirty = from.isOffHeapBINDirty(fromIdx);
+        // 提取 LSN（lsn）：获取源槽位关联的日志序列号。
         final long lsn = from.getLsn(fromIdx);
+        // 取状态字节（state）：获取源槽位的控制状态位（如 KD、EMBEDDED 等）。
         final byte state = from.entryStates[fromIdx];
+        // 提取键与嵌入数据（key & data）：通过源节点的 getKey 获取键，如果该槽位包含嵌入式数据（haveEmbeddedData），则同时通过 getData 提取出数据体，否则 data 为 null。
         final byte[] key = from.getKey(fromIdx);
         final byte[] data = (from.haveEmbeddedData(fromIdx) ?
                              from.getData(fromIdx) : null);
-
+        // 记录当前节点当前的 LSN 存储开销，用于后续计算内存预算变动。
         long oldSize = computeLsnOverhead();
 
         ++nEntries;
@@ -4450,6 +4616,8 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
          * When calling setTarget for an IN child we must latch it, because
          * setTarget sets the parent.
          */
+        // 如果目标子节点是一个内部节点（IN），在将其指针绑定到当前父节点之前，必须先对其加锁（latchNoUpdateLRU），
+        // 因为设置子节点的父指针（setTarget 内部会修改子节点的 parent 引用）需要独占保护，操作完成后释放锁。
         if (target != null && target.isIN()) {
             final IN in = (IN) target;
             in.latchNoUpdateLRU(databaseImpl);
@@ -4458,26 +4626,29 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
         } else {
             setTarget(idx, target);
         }
-
+        // 写入键、LSN 与状态标志
+        // 将提取出的 key（以及可能的内联 data）插入到新槽位 idx 中。
+        // 返回的 multiSlotChange 标志指示这次键插入是否触发了底层数组的结构变异（如容量扩容或类型转换）。
         boolean multiSlotChange = insertKey(idx, key, data);
 
         /* setLsnInternal can mutate to an array of longs. */
+        // 将源 LSN 写入新槽位。该方法内部支持紧凑型 LSN 数组向长整型 LSN 数组的自动变异。
         setLsnInternal(idx, lsn);
-
+        // 将源槽位的状态字节（标志位）完整复制到新槽位中。
         entryStates[idx] = state;
-
+        // 如果源槽位关联了有效的堆外缓存 ID（ohBinId >= 0），则在当前节点的对应槽位中记录该堆外 ID，并更新堆外缓存管理器，将该堆外块的归属所有者（Owner）正式变更为当前的 IN 节点。
         if (ohBinId >= 0) {
             setOffHeapBINId(idx, ohBinId, ohBinPri2, ohBinDirty);
             getOffHeapCache().setOwner(ohBinId, this);
         }
-
+        // 如果发生了结构变异（multiSlotChange 为真），则全局重新计算当前节点的整体内存大小并同步更新。
         if (multiSlotChange) {
             updateMemorySize(inMemorySize, computeMemorySize());
         } else {
             long newSize = getEntryInMemorySize(idx) + computeLsnOverhead();
             updateMemorySize(oldSize, newSize);
         }
-
+        // 将当前节点标记为“脏（Dirty）”，表示其内存状态已被修改，等待后续检查点（Checkpoint）将其刷入磁盘日志。
         setDirty(true);
     }
 
@@ -4993,10 +5164,14 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
     /**
      * Returns whether any child is non-null in the main or off-heap cache.
      */
+    // 检查当前内部节点下是否有任何子节点（子 IN 或 BIN）当前驻留在主内存缓存或堆外缓存中。
     public boolean hasCachedChildren() {
+        // 强制要求当前线程必须持有该 IN 节点的并发锁（Latch）（无论是共享锁还是排他锁）。
         assert isLatchOwner();
-
+        // 遍历所有槽位循环
         for (int i = 0; i < getNEntries(); i++) {
+            // 访问子节点目标管理对象（INTargetRep），获取第 i 个槽位上指向子节点的内存引用。
+            // 只有当子节点被加载到内存（Fault-in）时，其目标引用才不为空；如果子节点尚未加载或已经被内存驱逐器（Evictor）卸载，其目标引用就是 null。
             if (entryTargets.get(i) != null) {
                 return true;
             }
@@ -5796,14 +5971,18 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
      * but also for off-heap caching. Therefore, this method should not have
      * side effects unless the clearDirtyBits param is true.
      */
+    // 核心作用是将当前树节点（IN 或 BIN）的内存结构、元数据以及所有有效的槽位信息序列化为字节流，以便写入磁盘日志文件中（在 BIN 节点的场景下，也用于堆外缓存的序列化）。
+    // ByteBuffer logBuffer 目标字节缓冲区。序列化后的所有二进制数据都会被写入到这个 Buffer 中。
+    // boolean deltasOnly 是否仅序列化增量（Delta）数据。如果为 true，则只把发生修改的“脏”槽位写入日志（称为 BIN-delta 日志记录，可大幅减少日志写入量）；如果为 false，则序列化完整的节点。
+    // boolean clearDirtyBits 是否在序列化完成后清除槽位的“脏（Dirty）”状态位。
     public final void serialize(ByteBuffer logBuffer,
                                 boolean deltasOnly,
                                 boolean clearDirtyBits) {
-
+        // 如果开启了仅序列化增量（deltasOnly），那么当前节点必须是底层的 BIN 节点，上层 IN 不支持增量日志。
         assert(!deltasOnly || isBIN());
 
         BIN bin = (isBIN() ? (BIN)this : null);
-
+        // 如果是增量日志，则创建一个布隆过滤器（bloomFilter）用于快速查找；同时检查并写入记录的过期时间基准（Expiration Base）。
         byte[] bloomFilter = (deltasOnly ? bin.createBloomFilter() : null);
 
         boolean haveExpiration = false;
@@ -5811,9 +5990,10 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
         if (bin != null) {
             int base = bin.getExpirationBase();
             haveExpiration = (base != -1);
+            // 写入记录的过期时间基准（Expiration Base）
             LogUtils.writePackedInt(logBuffer, base);
         }
-
+        // 写入节点的唯一标识 ID 和路由标识键。
         LogUtils.writePackedLong(logBuffer, nodeId);
 
         LogUtils.writeByteArray(logBuffer, identifierKey);
@@ -5821,7 +6001,7 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
         boolean hasKeyPrefix = (keyPrefix != null);
         boolean mayHaveLastLoggedSize = mayHaveLastLoggedSizeStored();
         boolean haveVLSNCache = (bin != null && bin.isVLSNCachingEnabled());
-
+        // JE 将多个布尔属性（是否为根节点、是否有键前缀、是否有上次记录大小、是否有布隆过滤器、是否有 VLSN 缓存、过期时间单位等）通过位运算合并压缩到一个单独的 byte 中，极大节省了日志存储空间，最后写入 logBuffer
         byte booleans = (byte) (isRoot() ? 1 : 0);
         booleans |= (hasKeyPrefix ? 2 : 0);
         booleans |= (mayHaveLastLoggedSize ? 4 : 0);
@@ -5830,13 +6010,13 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
         booleans |= (isExpirationInHours() ? 32 : 0);
 
         logBuffer.put(booleans);
-
+        // 写入前缀与条目统计信息
         if (hasKeyPrefix) {
             LogUtils.writeByteArray(logBuffer, keyPrefix);
         }
 
         final int nEntriesToWrite = getNEntriesToWrite(deltasOnly);
-
+        // 计算需要写入的条目数（nEntriesToWrite）和最大容量（maxEntriesToWrite），并通过变长整数（Packed Int）格式写入缓冲区。
         final int maxEntriesToWrite =
             (!deltasOnly ?
              getMaxEntries() :
@@ -5858,18 +6038,19 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
         LogUtils.writePackedInt(logBuffer, maxEntriesToWrite);
 
         /* true if compact representation. */
+        // 检查当前节点是否使用紧凑的 LSN 字节数组存储。如果是，写入 true 标记，并把基础文件号（baseFileNumber）写入日志；否则写入 false。
         boolean compactLsnsRep = (entryLsnLongArray == null);
         LogUtils.writeBoolean(logBuffer, compactLsnsRep);
         if (compactLsnsRep) {
             LogUtils.writeInt(logBuffer, (int) baseFileNumber);
         }
-
+        // 遍历并序列化每一个有效槽位
         for (int i = 0; i < nEntries; i++) {
-
+            // 如果是增量序列化（deltasOnly）且当前槽位不是脏数据（未被修改），则跳过不写。
             if (deltasOnly && !isDirty(i)) {
                 continue;
             }
-
+            // 写入槽位的键（entryKeys.get(i)），并执行断言检查确保没有非法的空 LSN。
             LogUtils.writeByteArray(logBuffer, entryKeys.get(i));
 
             /*
@@ -5882,7 +6063,7 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
                 " db=" + databaseImpl.getDebugName() +
                 " isDeferredWriteMode=" + databaseImpl.isDeferredWriteMode() +
                 " isTemporary=" + databaseImpl.isTemporary();
-
+            // LSN 写入：根据是紧凑模式还是完整 long 数组模式，将 LSN 按对应的字节格式写入缓冲区。
             if (compactLsnsRep) {
                 int offset = i << 2;
                 int fileOffset = getFileOffset(offset);
@@ -5893,14 +6074,14 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
             } else {
                 LogUtils.writeLong(logBuffer, entryLsnLongArray[i]);
             }
-
+            // 状态字节处理：写入清理掉瞬态位之后的槽位状态字节（entryStates[i]）。如果 clearDirtyBits 为真，则通过按位与运算将该槽位的脏状态位清除。
             logBuffer.put(
                 (byte) (entryStates[i] & EntryStates.CLEAR_TRANSIENT_BITS));
 
             if (clearDirtyBits) {
                 entryStates[i] &= EntryStates.CLEAR_DIRTY_BIT;
             }
-
+            // 根据配置和条件，依次将槽位的上次日志记录大小、缓存的 VLSN 以及过期时间偏移量写入日志。
             if (isLastLoggedSizeStored(i)) {
                 LogUtils.writePackedInt(logBuffer, getLastLoggedSize(i));
             }
@@ -5914,7 +6095,7 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
                     logBuffer, bin.getExpirationOffset(i));
             }
         }
-
+        // 增量收尾：如果本次序列化是 BIN-delta，最后会在缓冲区尾部追加完整 BIN 的条目数、最大容量以及布隆过滤器的二进制数据，供崩溃恢复时校验和重建使用。
         if (deltasOnly) {
             LogUtils.writePackedInt(logBuffer, bin.getFullBinNEntries());
             LogUtils.writePackedInt(logBuffer, bin.getFullBinMaxEntries());
@@ -5984,9 +6165,15 @@ public class IN extends Node implements Comparable<IN>, LatchContext {
      * side effects unless the clearDirtyBits param is true or an older log
      * version is passed (off-heap caching uses the current version).
      */
+    // 反序列化与内存重建方法
+    // 从磁盘日志或堆外缓存的字节缓冲区（itemBuffer）中读取二进制数据，逆向解析并重建（Materialize）当前树节点（IN 或 BIN）的内存结构。
+    // 同时，它通过传入的日志版本号（entryVersion）完美兼容了不同历史版本的日志格式。
     public final void materialize(
+        // 包含序列化字节数据的输入缓冲区。反序列化过程将从该 Buffer 的当前位置开始读取数据。
         ByteBuffer itemBuffer,
+        // 日志条目的版本号（Log Version）。由于 JE 历经多年演进，不同版本的日志结构可能存在差异，该参数用于做向下兼容和版本特性断言。
         int entryVersion,
+        // 指示本次反序列化的是否为增量日志（BIN-delta）。若为 true，代表这是一条只包含修改槽位的局部增量记录。
         boolean deltasOnly,
         boolean clearDirtyBits) {
 

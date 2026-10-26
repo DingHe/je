@@ -29,16 +29,26 @@ import com.sleepycat.je.utilint.DbLsn;
  * A ChildReference is a reference in the tree from parent to child.  It
  * contains a node reference, key, and LSN.
  */
+// JE B+树中父节点（IN，Internal Node）到子节点（IN 或 LN）之间的关键指针引用。
+// 承载内容：每一个内部节点（IN / BIN）内部都包含一个由 ChildReference 组成的数组（即槽位 / Slots）。每个引用精确记录了三样东西：
+// target：指向子节点在内存中的对象引用（如果子节点被驱逐出内存，则为 null）。
+// lsn：子节点在磁盘日志文件中的物理坐标（Log Sequence Number）。
+// key：子节点的定位键（Key）。
+// 状态管理：它还通过一个 state 字节维护了条目的生命周期状态（如脏状态 DIRTY、已知删除 KNOWN_DELETED、待删除 PENDING_DELETED 等）。
 public class ChildReference implements Loggable {
-
+    // 指向子节点内存对象的弱/强引用。如果该子节点当前驻留在内存中，此字段保存其对象引用；若已被内存驱逐（Evicted），此字段为 null。
     private Node target;
+    // 子节点在磁盘日志中的物理位置坐标（LSN）。当 target 为 null 时，系统就是依靠这个 LSN 去磁盘日志中将子节点重新加载（Fault in）回内存的。
     private long lsn;
+    // 该子节点对应的定位键（Key）。在 B+树的内部节点中，用于二分查找导航。
     private byte[] key;
+    // 状态位字段（Bit Field）。通过按位与操作记录条目的元数据状态，包含脏状态（DIRTY_BIT）、已知删除（KNOWN_DELETED_BIT）和待删除（PENDING_DELETED_BIT）。
     private byte state;
 
     /**
      * Construct an empty child reference, for reading from the log.
      */
+    // 初始化一个空的子引用（目标为 null，空 Key，空 LSN，状态为 0），专门用于从磁盘日志反序列化时构建对象。
     public ChildReference() {
         init(null, Key.EMPTY_KEY, DbLsn.NULL_LSN, 0);
     }
@@ -46,6 +56,7 @@ public class ChildReference implements Loggable {
     /**
      * Construct a ChildReference for inserting a new entry.
      */
+    // 用于插入新条目的构造函数。绑定目标节点、键和 LSN，并将状态默认标记为脏（DIRTY_BIT）。
     public ChildReference(Node target, byte[] key, long lsn) {
         init(target, key, lsn, EntryStates.DIRTY_BIT);
     }
@@ -102,11 +113,12 @@ public class ChildReference implements Loggable {
      * null if there is no target of this ChildReference, or null if a
      * pendingDelete or knownDeleted entry has been cleaned.
      */
+    // 极其核心的按需加载（Fault in / Fetch）方法。
     public Node fetchTarget(DatabaseImpl database, IN parent)
         throws DatabaseException {
 
         if (target == null) {
-
+            // 如果 target 为 null 且 LSN 为 NULL_LSN：若属于已知删除则安全返回 null，否则抛出异常。
             if (lsn == DbLsn.NULL_LSN) {
                 if (!isKnownDeleted()) {
                     throw EnvironmentFailureException.unexpectedState(
@@ -120,6 +132,7 @@ public class ChildReference implements Loggable {
 
             EnvironmentImpl envImpl = database.getEnv();
             try {
+                // 若有有效 LSN，通过 LogManager.getEntry(lsn) 从磁盘日志中读取目标 IN 对象。
                 Node node = (Node) envImpl.getLogManager().getEntry(lsn);
 
                 /*
@@ -135,7 +148,7 @@ public class ChildReference implements Loggable {
                 final IN in = (IN) node;
 
                 in.latchNoUpdateLRU(database);
-
+                // 执行后置初始化（postFetchInit）、绑定 target。
                 node.postFetchInit(database, lsn);
                 target = node;
 
@@ -170,7 +183,7 @@ public class ChildReference implements Loggable {
                     e);
             }
         }
-
+        // 如果内存中已有 target（不为 null），直接返回。
         return target;
     }
 

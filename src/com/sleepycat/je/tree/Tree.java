@@ -134,15 +134,23 @@ import com.sleepycat.je.utilint.VLSN;
  * these cases:
  *  Reads when LN is in cache, or LN is not needed (key-only op, e.g., dups)
  */
+// Tree 类是整个 B+树（B+Tree）实现的顶层核心类。
+// 管理着整个索引树的根节点（Root）、最大树节点条目数、并发锁/闩机制（Latch）、统计信息，并提供了遍历、查找、插入、删除等核心树操作的入口。
+// 主要承担以下职责：
+// B+树的根与生命周期管理：持有着指向根节点（Root）的引用，并负责根节点的初始化、替换、分裂（Root Split）以及持久化日志关联。
+// 并发控制与并发闩（Latch）保护：通过专属的 rootLatch（根节点闩）来保护根节点在并发环境下的安全，防止在树结构调整（如根分裂）时发生竞态条件。
+// 树的漫游与导航（Navigation & Search）：提供了从根向下搜索、获取最左/最右节点、以及在同级 IN（Internal Node）之间进行前进或后退遍历的方法。
+// 子树删除与空间回收：实现了整条不必要分支的剪枝与删除逻辑（delete / searchDeletableSubTree），在叶子节点变空时向上清理无用的内部节点。
 public final class Tree implements Loggable {
 
     /* For debug tracing */
+    // 用于记录根节点发生分裂（Root Split）时的追踪日志前缀。
     private static final String TRACE_ROOT_SPLIT = "RootSplit:";
-
+    // 关联当前的数据库实例（DatabaseImpl），用于获取环境配置、最大树条目数以及将修改传播到数据库状态中。
     private DatabaseImpl database;
-
+    // 每个树节点（IN/BIN）允许容纳的最大条目数（Max Entries Per Node），通常由数据库配置决定
     private int maxTreeEntriesPerNode;
-
+    // 指向 B+树根节点的子引用（ChildReference）。它封装了根节点的目标对象（Node）、定位键（Key）和日志LSN。
     private ChildReference root;
 
     /*
@@ -150,6 +158,7 @@ public final class Tree implements Loggable {
      * against the root being changed out from underneath us by splitRoot.
      * After the root IN is latched, the rootLatch can be released.
      */
+    // 专用于保护树根节点的共享/排他闩（Shared Latch）。防止在多个线程并发访问或修改树时，根节点被 splitRoot 等操作意外替换。
     private SharedLatch rootLatch;
 
     /*
@@ -157,21 +166,26 @@ public final class Tree implements Loggable {
      * avoid the cost of Throwable.fillInStack() every time it's thrown.
      * [#13354].
      */
+    // 为了避免每次树节点分裂需要扩容时重复创建 Throwable 堆栈轨迹所带来的性能开销，这里直接重用静态异常。
     private static SplitRequiredException splitRequiredException =
         new SplitRequiredException();
 
     /* Stats */
+    // B+树统计信息的分组容器，用于收集和汇报树相关的运行时指标。
     private StatGroup stats;
 
     /* The number of tree root splited. */
+    // 统计树根节点发生分裂（Split）的总次数。
     private IntStat rootSplits;
     /* The number of latch upgrades from shared to exclusive required. */
+    // 统计树操作中，闩（Latch）从共享模式（Shared）升级为排他模式（Exclusive）的所需次数。
     private LongStat relatchesRequired;
-
+    // 线程本地变量，用于在树遍历过程中累加统计信息，避免多线程冲突。
     private final ThreadLocal<TreeWalkerStatsAccumulator> treeStatsAccumulatorTL =
         new ThreadLocal<TreeWalkerStatsAccumulator>();
 
     /* For unit tests */
+    // 分别用于模拟竞争条件、测试搜索、检查点、获取父IN以及加载IN时的行为。
     private TestHook waitHook; // used for generating race conditions
     private TestHook searchHook; // [#12736]
     private TestHook ckptHook; // [#13897]
@@ -183,10 +197,14 @@ public final class Tree implements Loggable {
      * do a regular search down the tree.  LEFT/RIGHT means search down the
      * left/right side to find the first/last node in the tree.
      */
+    // 定义了树搜索的类型枚举/常量。
     public static class SearchType {
         /* Search types */
+        // 普通向下搜索。
         public static final SearchType NORMAL = new SearchType();
+        // 沿左侧搜索以查找树中第一个（最小的）节点。
         public static final SearchType LEFT   = new SearchType();
+        // 沿右侧搜索以查找树中最后一个（最大的）节点。
         public static final SearchType RIGHT  = new SearchType();
 
         /* No lock types can be defined outside this class. */
@@ -206,6 +224,7 @@ public final class Tree implements Loggable {
      * logged during the next checkpoint. This is critical when updating the
      * root LSN.
      */
+    // 专用于根节点的子引用类，用于强制实施针对根节点的特殊规则（如锁升级、脏数据标记）。
     private class RootChildReference extends ChildReference {
 
         private RootChildReference() {
@@ -391,6 +410,7 @@ public final class Tree implements Loggable {
     /**
      * Set the root for the tree. Should only be called within the root latch.
      */
+    // 替换整棵树的根节点引用（例如在根节点分裂 splitRoot 或初始化时）。必须在持有根排他锁的前提下调用，确保根切换的原子性。
     public void setRoot(ChildReference newRoot, boolean notLatched) {
         assert (notLatched || rootLatch.isExclusiveOwner());
         root = newRoot;
@@ -416,12 +436,14 @@ public final class Tree implements Loggable {
      *
      * @return false if there is no real root.
      */
+    // 通过安全校验树的根引用对象（root）及其内存目标与磁盘 LSN 状态，判断当前树是否拥有一个真实、有效的根节点。
     public boolean rootExists() {
         if (root == null) {
             return false;
         }
-
+        // 说明根节点当前并没有驻留在内存中（可能被驱逐了，或者尚未加载）。
         if ((root.getTarget() == null) &&
+            // 说明该根节点也没有关联任何有效的磁盘日志坐标（即从未落盘过）。
             (root.getLsn() == DbLsn.NULL_LSN)) {
             return false;
         }
@@ -444,6 +466,7 @@ public final class Tree implements Loggable {
      * Helper to obtain the root IN with shared root latching.  Optionally
      * updates the generation of the root when latching it.
      */
+    // 根节点访问与生命周期管理核心方法
     public IN getRootIN(CacheMode cacheMode)
         throws DatabaseException {
 
@@ -459,7 +482,9 @@ public final class Tree implements Loggable {
 
         return getRootINInternal(cacheMode, true/*exclusive*/);
     }
-
+    // 获取 B+树根内部节点（Root IN）的内部通用方法
+    // 在持有树根机制共享锁（rootLatch）的安全保护下，安全地获取并返回根节点 IN 对象，同时支持按需对根 IN 节点施加共享锁或排他锁。
+    // boolean exclusive 根 IN 节点的加锁模式标志。如果为 true：表示获取到根 IN 对象后，需要对其施加排他锁（Exclusive Latch / 写锁）。
     private IN getRootINInternal(CacheMode cacheMode, boolean exclusive)
         throws DatabaseException {
 
@@ -474,14 +499,17 @@ public final class Tree implements Loggable {
     /**
      * Helper to obtain the root IN, when the root latch is already held.
      */
+    // 在假定顶层的树根保护机制（rootLatch）已经处于被持有（Held）的前提下，安全地从缓存或磁盘中加载根内部节点（Root IN），
+    // 并根据调用方的需求为其施加排他锁（Exclusive Latch）或共享锁（Shared Latch），最后将其返回。
     public IN getRootINRootAlreadyLatched(
         CacheMode cacheMode,
         boolean exclusive) {
-
+        // 快速检查整棵 B+树当前是否存在一个真实的、有效的根节点。
         if (!rootExists()) {
             return null;
         }
-
+        // 如果根 IN 当前已经驻留在内存中，它会直接被返回。
+        // 如果根 IN 曾被内存驱逐器（Evictor）驱逐出内存，该方法会触发底层机制（通过 LSN）将其从磁盘日志中重新加载（Fault in）到内存中。
         final IN rootIN = (IN) root.fetchTarget(database, null);
 
         if (exclusive) {
@@ -825,6 +853,8 @@ public final class Tree implements Loggable {
      * @return the leftmost node in the tree, null if the tree is empty.  The
      * returned node is latched and the caller must release it.
      */
+    // 查找整棵 B+树最左侧（最小）叶子节点的方法
+    // 通过树的极左侧深度搜索，精准定位并返回全树第一个叶子节点（BIN），同时确保返回时该 BIN 处于加锁状态，并且如果它是精简的 BIN 格式，会将其安全突变为完整的 BIN。
     public BIN getFirstNode(CacheMode cacheMode)
         throws DatabaseException {
 
@@ -845,6 +875,7 @@ public final class Tree implements Loggable {
      * @return the rightmost node in the tree, null if the tree is empty.  The
      * returned node is latched and the caller must release it.
      */
+    // 最右侧（最大）的叶子节点（BIN），返回时该 BIN 已加锁，供上层进行全表扫描或首尾定位。
     public BIN getLastNode(CacheMode cacheMode)
         throws DatabaseException {
 
@@ -868,6 +899,7 @@ public final class Tree implements Loggable {
      * is latched and the caller must release it.  If null is returned, the
      * argument BIN remains latched.
      */
+    // 获取给定 BIN 在树中物理相邻的右侧或左侧邻居 BIN，支撑游标的常规前后范围扫描。
     public BIN getNextBin(BIN bin, CacheMode cacheMode)
         throws DatabaseException {
 
@@ -910,18 +942,27 @@ public final class Tree implements Loggable {
      * to parent.fetchIN(index) will also be replace with a local version of
      * grandparent latching. 
      */
+    // 核心横向遍历方法
+    // 获取同级相邻的内部节点 / BIN
+    // 在 B+树中，当游标（Cursor）在当前的叶子节点（BIN）扫描到头需要跨越到相邻的下一个或上一个 BIN 时，或者在树中进行同层遍历时，就会调用该方法。
+    // 它通过“向上回溯父节点（Ascend） $\rightarrow$ 在父节点中寻找相邻兄弟槽位 $\rightarrow$ 向下钻取（Descend）”的经典 B+树邻居查找算法来实现。
     public IN getNextIN(
+        // 当前的起始内部节点（通常是 BIN 或 IN）。调用该方法时，当前线程必须已经持有该节点的锁。
         IN prevIn,
+        // 如果为 true：表示向右寻找下一个邻居节点（Forward）。
+        // 如果为 false：表示向左寻找上一个邻居节点（Backward）
         boolean forward,
+        // 如果为 true：返回时对邻居节点施加共享锁（Shared Latch）
+        // 如果为 false：返回时对邻居节点施加排他锁（Exclusive Latch）。
         boolean latchShared,
         CacheMode cacheMode) {
-
+        // 调用方必须已经持有 prevIn 的锁。
         assert(prevIn.isLatchOwner());
 
         if (LatchSupport.TRACK_LATCHES) {
             LatchSupport.expectBtreeLatchesHeld(1);
         }
-
+        // 将当前的 prevIn（若是 BIN）突变为完整格式（mutateToFullBIN），确保其条目完整。
         prevIn.mutateToFullBIN(false /*leaveFreeSlot*/);
 
         /*
@@ -933,6 +974,9 @@ public final class Tree implements Loggable {
          * resultant node.  The exception to this is that if there are no
          * entries, we just use the identifier key.
          */
+        // 确定搜索键（searchKey）
+        // 为什么不直接用 identifierKey？：因为在查找邻居的过程中，如果当前节点或兄弟节点发生了分裂（Split），直接用旧的标识键可能不安全。
+        // 按方向取键：若正向遍历（forward=true），取当前节点中最右侧（最大）的键；若反向遍历，取最左侧（最小）的键。若当前节点为空，则退化使用其 identifierKey。
         final byte[] searchKey;
 
         if (prevIn.getNEntries() == 0) {
@@ -942,13 +986,17 @@ public final class Tree implements Loggable {
         } else {
             searchKey = prevIn.getKey(0);
         }
-
+        // 记录目标树高层级
         final int targetLevel = prevIn.getLevel();
+        // 初始化当前节点指针
         IN curr = prevIn;
         boolean currIsLatched = false;
+        // 父节点指针
         IN parent = null;
+        // 邻居节点指针
         IN nextIN = null;
         boolean nextINIsLatched = false;
+        // 退出标志
         boolean normalExit = false;
 
         /*
@@ -957,6 +1005,7 @@ public final class Tree implements Loggable {
          * the root level, we're done.
          */
         try {
+            // 核心：while(true) 循环（向上回溯与横向寻找）
             while (true) {
 
                 /*
@@ -964,7 +1013,7 @@ public final class Tree implements Loggable {
                  * reached the top of the tree.
                  */
                 currIsLatched = false;
-
+                // 如果在回溯过程中 curr 已经是树的根节点（isRoot()），说明已经到了树顶且没有更多同级兄弟了，释放锁并返回 null（表示没有相邻节点了）。
                 if (curr.isRoot()) {
                     /* We've reached the root of the tree. */
                     curr.releaseLatch();
@@ -975,7 +1024,7 @@ public final class Tree implements Loggable {
                     normalExit = true;
                     return null;
                 }
-
+                // 获取当前节点的父节点
                 final SearchResult result = getParentINForChildIN(
                     curr, false, /*useTargetLevel*/
                     true, /*doFetch*/ cacheMode);
@@ -997,10 +1046,11 @@ public final class Tree implements Loggable {
                  * of the parent.findEntry call in getParentNode, because we
                  * want to use our explicitly chosen search key.
                  */
+                // 在父节点中定位兄弟槽位
                 int index = parent.findEntry(searchKey, false, false);
 
                 final boolean moreEntriesThisIn;
-
+                // 若正向，索引加 1（index++），判断是否还未超出父节点的条目总数。
                 if (forward) {
                     index++;
                     moreEntriesThisIn = (index < parent.getNEntries());
@@ -1008,7 +1058,8 @@ public final class Tree implements Loggable {
                     moreEntriesThisIn = (index > 0);
                     index--;
                 }
-
+                // 前父节点内是否还包含同级的右侧（或左侧）兄弟节点。
+                // 分支 A：若父节点内存在同级兄弟
                 if (moreEntriesThisIn) {
 
                     /*
@@ -1016,6 +1067,7 @@ public final class Tree implements Loggable {
                      * in parent.  Get the entry, and then descend down the
                      * left most path to an IN.
                      */
+                    // 直接命中同层邻居：若兄弟节点的树高（level）与目标层级完全一致，说明直接找到了相邻的 BIN 或同级 IN：
                     nextIN = parent.fetchIN(index, cacheMode);
 
                     if (LatchSupport.TRACK_LATCHES) {
@@ -1050,7 +1102,8 @@ public final class Tree implements Loggable {
                         return nextIN;
 
                     } else {
-
+                    // 分支 B：若落在了更高层的内部节点 (else 块)
+                    // 跨子树向下钻取：如果获取到的 nextIN 处于更高的层级（说明当前子树已经扫描完，需要跨越到隔壁子树的最左侧或最右侧叶子节点），则对其加锁、释放父锁，然后调用 searchSubTree 一路向下钻取到目标层级并返回。
                         /*
                          * We landed at a higher level than the target level.
                          * Descend down to the appropriate level.
@@ -1085,6 +1138,7 @@ public final class Tree implements Loggable {
                 }
 
                 /* Nothing at this level. Ascend to a higher level. */
+                // 分支 C：若当前父节点已无更多兄弟（继续向上回溯）
                 curr = parent;
                 currIsLatched = true;
                 parent = null; // to avoid falsely unlatching parent below
@@ -2195,30 +2249,41 @@ public final class Tree implements Loggable {
      * responsibility to do the findEntry() call on the key and BIN to locate
      * the entry (if any) that matches key. 
      */
+    // 最核心的向下检索方法
+    // 从 B+树的根节点（Root IN）出发，根据指定的搜索类型（常规查找特定 Key，或者寻找全树最左/最右的极值 BIN），通过锁耦合（Latch Coupling）机制一层层向下遍历，最终精准定位并返回目标叶子节点（BIN）。
+    // 返回时该 BIN 已被加锁，调用方使用完毕后必须负责将其释放。
     public BIN search(
+        // 要查找的目标键（Key）。如果 searchType 是 LEFT 或 RIGHT（寻找极值），此参数通常传入 null。
         byte[] key,
+        // 树的搜索类型枚举。
         SearchType searchType,
+        // 边界追踪标志对象（可为 null）。如果传入非空对象，该方法会顺便计算并返回所找到的 BIN 是否为数据库中的“第一个 BIN”或“最后一个 BIN”。
         BINBoundary binBoundary,
+        // 缓存控制模式。在加载子节点时控制 LRU 队列更新及缓存行为。
         CacheMode cacheMode,
+        // 缓存控制模式。在加载子节点时控制 LRU 队列更新及缓存行为。
         Comparator<byte[]> comparator) {
-
+        // 获取根节点并判空
         IN rootIN = getRootIN(cacheMode);
 
         if (rootIN == null) {
             return null;
         }
-
+        // 确保如果执行 LEFT 或 RIGHT 极值搜索时，key 必须为 null
         assert ((searchType != SearchType.LEFT &&
                  searchType != SearchType.RIGHT) || key == null);
-
+        // 若传入了 binBoundary 追踪器，先将其默认设为既是第一也是最后，后续在向下遍历槽位时再逐层修正。
         if (binBoundary != null) {
             binBoundary.isLastBin = true;
             binBoundary.isFirstBin = true;
         }
-
+        // 标记是否成功到达目标 BIN
         boolean success = false;
+        // 槽位索引
         int index;
+        // 从根节点 rootIN 开始
         IN parent = rootIN;
+        // 子节点引用
         IN child = null;
 
         TreeWalkerStatsAccumulator treeStatsAccumulator =
@@ -2230,17 +2295,22 @@ public final class Tree implements Loggable {
             }
 
             do {
+                // 核心遍历循环 (do-while)
+                // 如果上层内部节点（IN）的条目数为 0，说明树状态异常，抛出环境失败异常。
                 if (parent.getNEntries() == 0) {
                     throw EnvironmentFailureException.unexpectedState(
                         "Upper IN with 0 entries");
                 }
-
+                // NORMAL 查找
+                // 在当前 IN 的有序槽位中通过二分查找定位匹配或应插入的 Key 所在索引。
                 if (searchType == SearchType.NORMAL) {
                     index = parent.findEntry(key, false, false, comparator);
-
+                // LEFT 查找
+                // 直接锁定最左侧的第一个槽位（索引 0）
                 } else if (searchType == SearchType.LEFT) {
                     index = 0;
-
+                // RIGHT 查找
+                // 直接锁定最右侧的最后一个槽位（索引 parent.getNEntries() - 1）。
                 } else if (searchType == SearchType.RIGHT) {
                     index = parent.getNEntries() - 1;
 
@@ -2250,7 +2320,7 @@ public final class Tree implements Loggable {
                 }
 
                 assert(index >= 0);
-
+                // 更新 BIN 边界状态
                 if (binBoundary != null) {
                     if (index != parent.getNEntries() - 1) {
                         binBoundary.isLastBin = false;
@@ -2259,9 +2329,9 @@ public final class Tree implements Loggable {
                         binBoundary.isFirstBin = false;
                     }
                 }
-
+                // 在不加锁的情况下获取子节点（防止死锁或长时间阻塞）。若子节点未在内存中，会触发从磁盘加载。
                 child = parent.fetchINWithNoLatch(index, key, cacheMode);
-
+                // 并发空指针防御：若并发环境下子节点刚好被驱逐（child == null），则退守回根节点重新开始循环。
                 if (child == null) {
                     parent = getRootIN(cacheMode);
                     assert(parent != null);
@@ -2272,16 +2342,18 @@ public final class Tree implements Loggable {
                 }
 
                 /* Latch the child. Note: BINs are always latched exclusive. */
+                // 对子节点 child 加锁
+
                 latchChildShared(parent, child, cacheMode);
 
                 if (treeStatsAccumulator != null) {
                     child.accumulateStats(treeStatsAccumulator);
                 }
-
+                // 立即释放当前父节点 parent 的锁（
                 parent.releaseLatch();
                 parent = child;
                 child = null;
-
+            // 只要当前的 parent 还不是底层的叶子节点（BIN），就持续向下钻取。
             } while (!parent.isBIN());
 
             success = true;

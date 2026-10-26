@@ -33,21 +33,34 @@ import com.sleepycat.je.utilint.SizeofMarker;
  * This object calls IN.updateMemorySize to track the memory it uses.
  * EMPTY_REP uses no memory because it is a singleton.
  */
+// 用于管理 IN（内部节点）中每个槽位关联的非负长整型数组（如各种计数器、版本号或特定数值标记）的抽象基类及其多种演进形态
+// 初始态（EmptyRep）：默认采用一个轻量级的空表示（使用单例模式，零内存开销）。
+// 稀疏态（SparseRep）：当只有少数槽位设置了非零值时（最多 4 个），采用键值平铺的稀疏数组存储。
+// 默认态（DefaultRep）：当数据增多时，演进为连续的字节数组。
+// 变长字节优化（Variable-Byte-Width）：它会根据存储的最大数值大小动态调整每个数字占用的字节数（从 1 字节到 8 字节不等），避免浪费内存。
 public abstract class INLongRep {
-
+    // 获取指定槽位索引处的 long 值。
     public abstract long get(int idx);
+    // 设置指定槽位的长整型数值，必要时触发底层形态变异并更新父节点内存开销。
     public abstract INLongRep set(int idx, long val, IN parent);
+    // 尝试对存储进行压缩（若全为 0 则退化为空表示）。
     public abstract INLongRep compact(IN parent, EmptyRep emptyRep);
+    // 清空所有数据并重置为空表示。
     public abstract INLongRep clear(IN parent, EmptyRep emptyRep);
+    // 检查当前表示是否完全为空（即所有值都是 0）。
     public abstract boolean isEmpty();
+    // 在数组内部复制或平移多个槽位的数据。
     public abstract INLongRep copy(int from, int to, int n, IN parent);
+    // 调整底层存储容量。
     public abstract INLongRep resize(int capacity);
+    // 计算当前底层表示实际占用的内存大小（字节数）。
     public abstract long getMemorySize();
 
     /**
      * Initially empty (all values are zero) but will mutate as needed when
      * non-zero values are passed to set().
      */
+    // 刚创建或完全没有非零值的 IN 节点，采用无状态单例设计。
     public static class EmptyRep extends INLongRep {
 
         final int minLength;
@@ -121,10 +134,11 @@ public abstract class INLongRep {
             return 0;
         }
     }
-
+    // 当数值较多或超出稀疏限制时使用。它将所有长整型数据紧凑地平铺在一个连续的 byte[] 字节数组中。
     public static class DefaultRep extends INLongRep {
 
         /** Maximum value indexed by number of bytes. */
+        // 记录了不同字节长度（1 到 8 字节）所能表示的最大无符号数值极限，用于判断是否需要动态升级字节宽度。
         private static long[] MAX_VALUE = {
             0x0L,
             0xFFL,
@@ -136,8 +150,9 @@ public abstract class INLongRep {
             0xFFFFFFFFFFFFFFL,
             0x7FFFFFFFFFFFFFFFL,
         };
-
+        // 容纳所有数值的底层连续字节数组。
         private final byte[] byteArray;
+        // 每个数值占用的固定字节数（例如 1、2 或 4 字节不等）。
         final int bytesPerValue;
 
         public DefaultRep(int capacity, int nBytes) {

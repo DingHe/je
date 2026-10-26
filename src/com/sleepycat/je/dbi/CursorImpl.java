@@ -64,42 +64,56 @@ import com.sleepycat.je.utilint.VLSN;
 /**
  * A CursorImpl is the internal implementation of the cursor.
  */
+// 负责处理数据库记录的定位、遍历、加锁、缓存管理以及删除/修改等核心逻辑。
+// 数据库中用于遍历、检索和修改数据库记录的内部驱动核心。
+// 状态与定位追踪：它维护了游标当前在 B 树中所处的精确几何位置（由底层的 BIN 节点和具体的槽位索引 index 共同决定）。
+// 事务与锁管理：它持有对应的事务/锁定代理对象（Locker），负责在读写记录时自动获取和释放读锁、写锁。
+// 内存与缓存联动：支持精细的缓存模式（CacheMode），能够在游标移动或关闭时配合 Evictor 自动将冷数据（LN 或 BIN）从内存中驱逐出去，防止内存溢出。
 public class CursorImpl implements Cloneable {
-
+    // 调试开关。
     private static final boolean DEBUG = false;
-
+    // 游标未初始化状态（刚刚创建或重置后，未指向任何有效记录）。
     private static final byte CURSOR_NOT_INITIALIZED = 1;
+    // 游标未初始化状态（刚刚创建或重置后，未指向任何有效记录）。
     private static final byte CURSOR_INITIALIZED = 2;
+    // 游标已关闭状态。
     private static final byte CURSOR_CLOSED = 3;
+    // 用于写日志追踪的常量字符串。
     private static final String TRACE_DELETE = "Delete";
     private static final String TRACE_MOD = "Mod:";
     private static final String TRACE_INSERT = "Ins:";
-
+    // 表示找到了匹配项。
     public static final int FOUND = 0x1;
     /* Exact match on the key portion. */
+    // 表示键（Key）完全精确匹配。
     public static final int EXACT_KEY = 0x2;
     /* Record found is the last one in the dbImpl. */
+    // 表示找到的记录是整个数据库中的最后一项。
     public static final int FOUND_LAST = 0x4;
 
     /*
      * Allocate hashCode ids from this. [#13896]
      */
+    // 用于为每个游标分配唯一 ID。
     private static long lastAllocatedId = 0;
 
     /*
      * Unique id that we can return as a hashCode to prevent calls to
      * Object.hashCode(). [#13896]
      */
+    // 当前游标的唯一标识 ID（充当高效的 hashCode()，避免调用开销）。
     private final int thisId;
 
     /* The dbImpl behind the handle. */
+    // 当前游标所属的数据库底层实例（DatabaseImpl）。
     private final DatabaseImpl dbImpl;
 
     /* Owning transaction. */
+    // 拥有该游标的事务/锁管理器（Locker）。
     private Locker locker;
-
+    // 指示非事务锁在游标重置或关闭时是否应当保留。
     private final boolean retainNonTxnLocks;
-
+    // 指示当前是否为二级索引游标。
     private final boolean isSecondaryCursor;
 
     /*
@@ -107,14 +121,19 @@ public class CursorImpl implements Cloneable {
      * in the BIN.  The bin is null if not established, and the index is
      * negative if not established.
      */
+    // 当前游标指向的底层内部节点（BIN）。若未初始化则为 null。
     private volatile BIN bin;
+    // 当前游标在 bin 中的槽位索引。若未初始化则为负数。
     private volatile int index;
 
     /* State of the cursor. See CURSOR_XXX above. */
+    // 当前游标的生命周期状态（CURSOR_NOT_INITIALIZED 等）。
     private byte status;
 
     private CacheMode cacheMode;
+    // 是否允许在游标操作期间触发关键内存驱逐。
     private boolean allowEviction;
+    // 前一个访问过的 BIN 节点（用于非黏性游标的 BIN 驱逐优化）。
     private BIN priorBIN;
 
     /*
@@ -122,6 +141,7 @@ public class CursorImpl implements Cloneable {
      * Is null if the cursor is uninitialized.  For a secondary cursor, is the
      * version of the primary record.
      */
+    // 当前位置记录的版本信息缓存。
     private RecordVersion currentRecordVersion;
 
     /*
@@ -129,12 +149,14 @@ public class CursorImpl implements Cloneable {
      * Both values are zero if the cursor is uninitialized. priStorageSize is
      * non-zero only if Cursor.readPrimaryAfterGet was called.
      */
+    // 当前记录的存储大小缓存。
     private int storageSize;
     private int priStorageSize;
 
     /* Number of secondary records written by a primary put or delete. */
+    // 由主键更新或删除所引发的二级索引写入计数。
     private int nSecWrites;
-
+    // 程局部的 B 树遍历统计累加器。
     private ThreadLocal<TreeWalkerStatsAccumulator> treeStatsAccumulatorTL;
 
     private TestHook testHook;

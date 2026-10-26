@@ -40,6 +40,13 @@ import com.sleepycat.je.evictor.Evictor;
  * must be careful to save the result value and use it for subsequent
  * operations, since it could represent the new mutated object.
  */
+// INArrayRep 是所有与 IN 节点关联的动态数组表示（如子节点目标引用、键集合等）的抽象基类
+// 核心动机：极致的空间效率（Storage Efficiency）。特别是在 JE 运行于“缓存饱满（Cache Full）”的高压环境中，数据结构需要根据填充密度在不同形态（如密集数组与稀疏数组、紧凑表示与标准表示）之间灵活切换。
+// 变异机制（Mutation）：通过采用策略模式，当对数组进行修改、扩容或压缩时，底层的具体实现类（如稀疏数组表示）可以动态变异（Mutate）为一个全新的对象实例（例如从稀疏变回密集，或反之）。因此，调用方必须捕获方法的返回值以获取更新后的引用。
+// 并发设计假设：该类本身不提供内置的线程同步机制。它假定所有的读操作都在共享锁（Shared Latch）保护下执行，而所有的修改操作（如 set、copy、compact）都在排他锁（Exclusive Latch）保护下执行。
+// ARRAY_BASE_TYPE：底层数组表示的基类或接口类型（代表变异前后的统一返回类型）。
+// REP_ENUM_TYPE：标识当前具体表示形态的枚举类型（用于区分不同的内部存储策略）。
+// ELEMENT_TYPE：数组中存储的单个元素的数据类型。
 public abstract class INArrayRep<ARRAY_BASE_TYPE, REP_ENUM_TYPE,
                                  ELEMENT_TYPE> {
 
@@ -47,6 +54,8 @@ public abstract class INArrayRep<ARRAY_BASE_TYPE, REP_ENUM_TYPE,
     }
 
     /* Returns the type associated with the representation. */
+    // 获取当前数组表示形式对应的类型枚举。
+    // 用于外部或调试时识别当前底层采用的是哪种存储策略（如密集型还是稀疏型）。
     public abstract REP_ENUM_TYPE getType();
 
     /**
@@ -58,11 +67,14 @@ public abstract class INArrayRep<ARRAY_BASE_TYPE, REP_ENUM_TYPE,
      *
      * @return either this, or the new representation if there was a mutation.
      */
+    // 将指定索引 idx 处的数组元素设为 e。
+    // 由于写入可能触发底层结构的动态变异，该方法会返回一个新的或者变异后的数组表示对象（如果未变异则返回 this）。调用方必须使用返回值更新引用。
     public abstract ARRAY_BASE_TYPE set(int idx, ELEMENT_TYPE e, IN parent);
 
     /**
      * Returns the element at idx.
      */
+    // 获取指定索引 idx 处的元素。
     public abstract ELEMENT_TYPE get(int idx);
 
     /**
@@ -76,6 +88,7 @@ public abstract class INArrayRep<ARRAY_BASE_TYPE, REP_ENUM_TYPE,
      *
      * @return either this, or the new representation if there was a mutation.
      */
+    // 将从源索引 from 开始的 n 个元素复制到目标索引 to 处。
     public abstract ARRAY_BASE_TYPE copy(int from, int to, int n, IN parent);
 
     /**
@@ -89,6 +102,8 @@ public abstract class INArrayRep<ARRAY_BASE_TYPE, REP_ENUM_TYPE,
      *
      * @return this or a more compact representation.
      */
+    // 尝试将当前数组精简为一个更紧凑的表示形式。
+    // 如果当前有大量空洞或可以通过稀疏压缩节省内存，则会转换为更省空间的形态；否则保持不变。返回变异后或当前的实例。
     public abstract ARRAY_BASE_TYPE compact(IN parent);
 
     /**
@@ -97,6 +112,8 @@ public abstract class INArrayRep<ARRAY_BASE_TYPE, REP_ENUM_TYPE,
      * capacity is enlarged. The caller guarantees that all truncated elements
      * are unused.
      */
+    // 调整底层数组的容量大小。
+    // 若容量减小，则截断末尾多余的元素；若容量增大，则在末尾填充空元素。调用方必须保证所有被截断的元素都是未被使用的。
     public abstract ARRAY_BASE_TYPE resize(int capacity);
 
     /**
@@ -106,6 +123,7 @@ public abstract class INArrayRep<ARRAY_BASE_TYPE, REP_ENUM_TYPE,
      *
      * @return the memory size of the representation in bytes
      */
+    // 计算当前底层表示在内存中实际占用的字节大小。
     public abstract long calculateMemorySize();
 
     /**
@@ -115,6 +133,7 @@ public abstract class INArrayRep<ARRAY_BASE_TYPE, REP_ENUM_TYPE,
      * be decremented
      * @param evictor the evictor that shoulds ths stat counters
      */
+    // 用于增减驱逐器（Evictor）中的缓存统计计数。
     abstract void updateCacheStats(boolean increment, Evictor evictor);
 
     /**
@@ -141,6 +160,7 @@ public abstract class INArrayRep<ARRAY_BASE_TYPE, REP_ENUM_TYPE,
      *
      * @param newRep the new representation that is replacing this one.
      */
+    // 当底层数组发生表示形态变更（Mutation）时，执行配套的簿记（Bookkeeping）清理与更新。
     final void noteRepChange(
         INArrayRep<ARRAY_BASE_TYPE, REP_ENUM_TYPE, ELEMENT_TYPE> newRep,
         IN parent) {

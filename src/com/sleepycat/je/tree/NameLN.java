@@ -30,6 +30,9 @@ import com.sleepycat.je.txn.Txn;
 /**
  * A NameLN represents a Leaf Node in the name->database id mapping tree.
  */
+// 在 JE 内部的命名数据库（Name Database，即存储所有用户数据库名称与对应 ID 映射关系的系统库）中，充当叶子节点来存储具体的数据库标识信息。
+// 背景：当用户在 JE 中通过字符串名称（如 "myDatabase"）打开或创建数据库时，系统并不直接把名称作为普通数据存放在用户表里，而是通过一个名为 NameDB 的内部系统目录树来进行管理。
+// 职责：NameLN 内部不存常规的用户数据，而是绑定了一个 DatabaseId（数据库唯一 ID） 以及一个 deleted（删除标记），并通过重写序列化和日志管理方法，确保数据库的创建、重命名和删除操作能够正确落盘与恢复。
 public final class NameLN extends LN {
 
     private static final String BEGIN_TAG = "<nameLN>";

@@ -74,6 +74,8 @@ import com.sleepycat.utilint.StringUtils;
  *
  * @see com.sleepycat.je.cleaner.UtilizationProfile
  */
+// 在 JE 内部的日志清理机制（Cleaner）中，负责追踪和持久化存储每一个磁盘日志文件（Log File）的利用率统计摘要（File Summary）以及废弃数据偏移量（Obsolete Offsets
+// 背景：JE 的后台 Cleaner 需要知道哪些日志文件包含了大量的“废弃记录（Obsolete Records）”，以便挑选垃圾最多的文件进行日志清理和合并。这些统计信息就保存在专用的 UtilizationProfile 数据库中，而每一个叶子节点就是一个 FileSummaryLN。
 public final class FileSummaryLN extends LN {
 
     private static final String BEGIN_TAG = "<fileSummaryLN>";

@@ -33,33 +33,36 @@ import com.sleepycat.je.utilint.SizeofMarker;
  * tansitionary representation changes, since each representation change has
  * a cpu cost and a gc cost associated with it.
  */
+// 专门负责管理 IN 节点中指向其子节点（子 IN 或 BIN）的内存引用指针（Node targets）。
+// 核心动机：极高的空间效率。在 B 树运行过程中，许多内部节点的子节点并未全部加载到内存中（即子节点指针大部分为 null）。为了避免为每个 IN 节点都分配一个固定大小、包含大量空指针的完整对象数组（如容量达数百个元素的 Node[]），JE 设计了多态的稀疏表示机制。
 public abstract class INTargetRep
     extends INArrayRep<INTargetRep, INTargetRep.Type, Node> {
-
+    // 单例模式的 None 表现形式实例。整个系统中所有无缓存子节点的 IN 节点均可共享此静态实例，避免重复创建对象。
     /* Single instance used for None rep. */
     public static final None NONE = new None();
 
+    // 定义了子节点目标指针支持的三种存储形态枚举（默认密集、稀疏、无）
     /* Enumeration for the different types of supported representations. */
     public enum Type { DEFAULT, SPARSE, NONE }
 
     public INTargetRep() {
     }
-
+    // 通用的密集存储实现，直接包装了一个标准的 Node[] 数组，适合子节点驻留较多的场景。
     /* The default non-sparse representation. It simply wraps an array. */
     public static class Default extends INTargetRep {
-
+        // 容纳所有子节点目标引用的数组。每个槽位对应一个子节点对象（未加载或已驱逐的子节点位置为 null）
         /* The target nodes */
         private final Node[] targets;
-
+        // 根据指定容量初始化 Node[] 数组。
         public Default(int capacity) {
             this.targets = new Node[capacity];
         }
-
+        // 供内存计算（Sizeof）使用的空构造函数。
         /* Only for use by the Sizeof utility. */
         public Default(@SuppressWarnings("unused") SizeofMarker marker) {
             targets = null;
         }
-
+        // 用于容量调整或变异时直接绑定已有数组。
         private Default(Node[] targets) {
             this.targets = targets;
         }

@@ -179,41 +179,54 @@ public class PackedInteger {
      *
      * @return the offset past the bytes written.
      */
+    // 核心作用是将一个 32 位的整型数字（int）按照可变字节长度压缩后写入字节数组中。
+    // 通过这种编码方式，较小的数字（绝对值较小的正数或负数）可以只占用 1 到 2 个字节，从而大幅节省磁盘日志空间和内存开销。
+    // byte[] buf：目标字节缓冲区。编码后的紧凑字节数据将被写入这个数组中。
+    // int offset：写入起始偏移量。指示从 buf 的哪一个索引位置开始写入打包后的数据。
+    // int value：待写入的原始整型数值（支持正数、负数及零）。
+    // return int（返回值）：返回写入完成后的下一个可用偏移量（即当前写入结束位置的下一个索引位置），方便调用方连续追加写入其他数据。
     public static int writeInt(byte[] buf, int offset, int value) {
-
+        // 记录当前写入的起始位置。这个位置后续将被用来存储标志头字节（Header Byte）。
         int byte1Off = offset;
         boolean negative;
-
+        // 如果数值小于 -119，说明它是一个绝对值较大的负数，无法用单字节直接表示。
         if (value < -119) {
             negative = true;
+            // 将负数转为正数，并减去 119（做区间偏移平移，以便后续作为无符号数压缩）。
             value = -value - 119;
         } else if (value > 119) {
             negative = false;
+            // 将正数减去 119 进行区间平移。
             value = value - 119;
         } else {
+            // 如果数值在 $[-119, 119]$ 之间：
+            // 直接将该数值强转为 byte 写入 buf[offset++] 中（该区间正好利用了单字节 $-128 \sim 127$ 的大部分空间，留出边缘给多字节标签）。
             buf[offset++] = (byte) value;
             return offset;
         }
+        // 如果执行到了这里，说明数值超出了 $[-119, 119]$ 范围。这里将 offset 自增 1，为开头的标志头字节留出空位，准备写入后续的有效数据字节。
         offset++;
-
+        // 写入平移后的 value 的最低 8 位（第 1 个有效载荷字节）。
         buf[offset++] = (byte) value;
+        // 检查高 24 位是否全为 0。如果是，说明该数字只需要 1 个额外字节就能完整表达（加上刚才留出的头字节，总共占用 2 个字节）。
         if ((value & 0xFFFFFF00) == 0) {
             buf[byte1Off] = negative ? (byte) -120 : (byte) 120;
             return offset;
         }
-
+        // 写入第 2 个有效载荷字节与 3 字节总长度判定
         buf[offset++] = (byte) (value >>> 8);
         if ((value & 0xFFFF0000) == 0) {
+            // 检查更高 16 位是否全为 0。如果是，说明总共占用 3 个字节（1 头字节 + 2 载荷字节）。
             buf[byte1Off] = negative ? (byte) -121 : (byte) 121;
             return offset;
         }
-
+        // 写入第 3 个有效载荷字节与 4 字节总长度判定
         buf[offset++] = (byte) (value >>> 16);
         if ((value & 0xFF000000) == 0) {
             buf[byte1Off] = negative ? (byte) -122 : (byte) 122;
             return offset;
         }
-
+        // 写入第 4 个有效载荷字节与 5 字节完整模式收尾
         buf[offset++] = (byte) (value >>> 24);
         buf[byte1Off] = negative ? (byte) -123 : (byte) 123;
         return offset;

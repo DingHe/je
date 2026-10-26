@@ -47,15 +47,21 @@ import com.sleepycat.je.utilint.SizeofMarker;
  * <code>Default</code> representation to minimize the chances of transitionary
  * "back and forth" representation changes that could prove to be expensive.
  */
+// 专职负责管理 IN 节点中的键（Keys）
+// 核心职责：
+// 多种存储格式支持：提供灵活的底层存储策略，兼顾通用性与内存效率。
+// 嵌入式记录管理：支持将小型记录的键和数据部分合并为“两部分键（Two-part key，通过 DupKeyData）”直接存入内部节点，避免二次寻址。
 public abstract class INKeyRep
     extends INArrayRep<INKeyRep, INKeyRep.Type, byte[]> {
 
     /* The different representations for keys. */
+    // Default（默认表示）：使用 byte[][] 数组，能够存储任意大小的键。
+    // MaxKeySize（紧凑表示）：使用单一的 byte[] 连续内存块，专为短键（长度 $\le 16$ 字节）设计，大幅消除了 Java 对象头和数组指针的内存开销。
     public enum Type { DEFAULT, MAX_KEY_SIZE };
 
     public INKeyRep() {
     }
-
+    // 返回当前键数组支持的最大容量或槽位数量。
     public abstract int length();
 
     /**
@@ -63,23 +69,24 @@ public abstract class INKeyRep
      * here, or false if each key has a separate byte array and its mem usage
      * is accounted for by the parent.
      */
+    // 指示键字节本身的内存开销是否由当前表示形式内部统一核算（如 MaxKeySize 返回 true），还是由父节点分开独立核算（如 Default 返回 false）。
     public abstract boolean accountsForKeyByteMemUsage();
-
+    // 获取指定索引 idx 处存储的键（或组合数据）的字节长度。
     public abstract int size(int idx);
-
+    // 在指定索引 idx 处设置键和数据。如果数据存在，会将其合并为双部分键存储。
     public abstract INKeyRep set(int idx, byte[] key, byte[] data, IN parent);
-
+    // 仅更新指定索引 idx 处的数据部分。
     public abstract INKeyRep setData(int idx, byte[] data, IN parent);
-
+    // 提取指定索引 idx 处嵌入的数据部分。
     public abstract byte[] getData(int idx);
-
+    // 提取指定索引处的键（如果包含嵌入数据，则剥离出纯键部分）。
     public abstract byte[] getKey(int idx, boolean embeddedData);
-
+    // 结合全局前缀（prefix）和槽位中的后缀，重构并返回完整的键。
     public abstract byte[] getFullKey(
         byte[] prefix,
         int idx,
         boolean embeddedData);
-
+    // 将搜索键与指定槽位的键进行高效比对（支持前缀匹配和自定义比较器）。
     public abstract int compareKeys(
         byte[] searchKey,
         byte[] prefix,
@@ -90,22 +97,24 @@ public abstract class INKeyRep
     /**
      * The default representation that's capable of storing keys of any size.
      */
+    // Default 是通用的键存储实现，底层采用标准二维字节数组 byte[][] keys。
     public static class Default extends INKeyRep {
-
+        // 容纳所有键的二维字节数组。
+        // 每个槽位对应一个独立的 byte[] 对象（或组合了数据的双部分键数组）。
         private final byte[][] keys;
-
+        // 根据节点最大容量初始化二维数组
         Default(int nodeMaxEntries) {
             this.keys = new byte[nodeMaxEntries][];
         }
-
+        // 专供内存计算（Sizeof）使用的空构造函数。
         public Default(@SuppressWarnings("unused") SizeofMarker marker) {
             keys = null;
         }
-
+        // 内部私有构造函数，用于容量调整或变异时直接绑定已有数组。
         private Default(byte[][] keys) {
             this.keys = keys;
         }
-
+        // 调整容量大小，通过 Arrays.copyOfRange 截断或扩展二维数组。
         @Override
         public INKeyRep resize(int capacity) {
             return new Default(Arrays.copyOfRange(keys, 0, capacity));
@@ -120,13 +129,13 @@ public abstract class INKeyRep
         public int length() {
             return keys.length;
         }
-
+        // 直接将键存入 keys[idx]。
         @Override
         public INKeyRep set(int idx, byte[] key, IN parent) {
             keys[idx] = key;
             return this;
         }
-
+        // 若无数据则存入纯键，若有数据则调用 DupKeyData.combine 合并后存入。
         @Override
         public INKeyRep set(int idx, byte[] key, byte[] data, IN parent) {
 
@@ -211,32 +220,38 @@ public abstract class INKeyRep
 
             return key;
         }
-
+        // 主要作用是将搜索键（searchKey）与指定槽位（idx）中存储的键进行高效比对，并支持键前缀压缩优化以及自定义比较器。
         @Override
         public int compareKeys(
+            // 外部传入的待搜索目标键。
             byte[] searchKey,
+            // 当前 IN 节点共享的键前缀（Key Prefix）。如果数据库未开启前缀压缩，此参数通常为 null 或空数组。
             byte[] prefix,
+            // 当前 IN 节点中的槽位索引（Slot Index），标明需要和哪个位置的键进行比对。
             int idx,
+            // 指示该槽位是否包含了嵌入式数据（Embedded Data）。即是否采用了“两部分键（DupKeyData）”格式，决定了解构时是否需要剥离数据部分。
             boolean embeddedData,
+            // 用户自定义的字节数组比较器。如果为 null，则退化为系统默认的无符号字节比较（Unsigned Byte Comparison）。
             Comparator<byte[]> comparator)
         {
+            // 自定义比较器分支处理
             if (comparator != null) {
                 byte[] myKey = getFullKey(prefix, idx, embeddedData);
                 return  Key.compareKeys(searchKey, myKey, comparator);
             }
 
             int cmp = 0;
-
+            // 无前缀情况下的直接比对
             if (prefix == null || prefix.length == 0) {
 
                 return compareSuffixes(
                     searchKey, 0, searchKey.length, idx, embeddedData);
             }
-
+            // 前缀部分的无符号字节比对
             cmp = Key.compareUnsignedBytes(
                 searchKey, 0, Math.min(searchKey.length, prefix.length),
                 prefix, 0, prefix.length);
-
+            // 前缀匹配成功后的后缀比对
             if (cmp == 0) {
 
                 int searchKeyOffset = prefix.length;

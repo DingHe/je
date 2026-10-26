@@ -104,6 +104,9 @@ import com.sleepycat.je.txn.LockType;
  *   root IN at lsn 300. However, the IN is non-txnal and will be recreated
  *   during reply of txnal information (LNs) by normal recovery processing.
  */
+// 在 JE 的系统级数据库映射树中，作为叶子节点承载和管理一个具体数据库的元数据实体（DatabaseImpl）
+// 承载内容：每个 MapLN 内部包含一个 DatabaseImpl 对象，该对象记录了该数据库的配置信息（Configuration）、文件利用率统计摘要（File Summary Utilization）以及该数据库自身的 B 树根节点指针（Root IN）。
+// 桥梁作用：它是连接“用户应用数据 B 树”与“JE 内部数据库映射目录”的唯一桥梁。由于其特殊的元数据定位，MapLN 的写入和修改受到严格的并发控制规则（如依赖数据库根 Latch 保护），以防止 B 树根节点与日志记录出现不同步。
 public final class MapLN extends LN {
 
     private static final String BEGIN_TAG = "<mapLN>";

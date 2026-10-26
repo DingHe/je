@@ -28,14 +28,21 @@ import com.sleepycat.je.tree.TreeUtils;
  * return longs from these methods so that we don't have to worry about the
  * lack of unsigned quantities.
  */
+// DbLsn 的核心作用是唯一标识、管理和操作数据库日志文件中的每一个物理记录。它是 JE 实现事务持久性、崩溃恢复（Recovery）、检查点（Checkpoint）以及后台日志清理（Cleaner）的基石。
+// 全局唯一的记录“坐标”
+// 在 JE 中，所有的数据库操作（如插入、更新、删除）最终都会被追加写入日志（Log）中。每一个被写入的日志记录都有一个独一无二的 LSN，而 DbLsn 类就是专门用来解析和处理这个 LSN 的。
+// LSN 的结构：一个 LSN 本质上是一个 64 位的长整型（long），其中高 32 位表示文件号（File Number），低 32 位表示文件内偏移量（File Offset）。它唯一标识了数据库日志环境中的某一条特定记录。
+// 解决 Java 无符号数痛点：由于 Java 缺乏原生的无符号数支持，DbLsn 通过位掩码和抽象方法，让开发者能够以 long 的形式安全地操作无符号的 32 位文件号与偏移量，而无需担心符号位带来的负数干扰。
 public class DbLsn {
+    // 32 位无符号掩码（低 32 位全 1）。用于截取或转换长整型中的低 32 位，将其作为无符号整数处理。
     static final long INT_MASK = 0xFFFFFFFFL;
-
+    // 文件内偏移量的最大值（约 4GB - 1 字节），即 32 位无符号整数的最大极限。
     public static final long MAX_FILE_OFFSET = 0xFFFFFFFFL;
 
     /* Signifies a transient LSN. */
+    // 最大文件号。在 JE 中被用作特殊标记，用来标志这是一个瞬态 LSN（Transient LSN）
     private static final long MAX_FILE_NUM = 0xFFFFFFFFL;
-
+    // 空 LSN（或无效 LSN）常量，值为 -1。用于表示未初始化、不存在或已失效的 LSN 引用。
     public static final long NULL_LSN = -1;
 
     private DbLsn() {

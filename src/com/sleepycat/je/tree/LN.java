@@ -49,8 +49,12 @@ import com.sleepycat.je.utilint.VLSN;
 /**
  * An LN represents a Leaf Node in the JE tree.
  */
+// 真实数据的绝对载体：存储用户写入数据库的实际数据字节（data）。它的父节点（BIN）维护键（Key）和物理/内存位置（LSN/Node Reference），而 LN 承载实际的值（Value）。
+// 记录状态与删除标记：当 data == null 时，该 LN 代表一个逻辑已删除（Tombstone / Deleted）的记录。
+// 日志序列化与事务联动：实现把节点数据打包成日志（LOG_INS_LN、LOG_UPD_LN、LOG_DEL_LN 等）写入磁盘日志管理器（LogManager），并在分布式/事务模式下配合写锁（WriteLockInfo）生成 Undo/Redo 恢复数据。
+// 内存与冷热状态追踪：通过非持久化的标志位（flags）追踪当前节点是否为内存“脏（Dirty）”数据，以及在内存驱逐（Eviction）策略中是否属于冷数据（FETCHED_COLD_BIT）。
 public class LN extends Node implements VersionedWriteLoggable {
-
+    // XML 格式化转储（Dump）调试时，标志 LN 节点开始的标签。
     private static final String BEGIN_TAG = "<ln>";
     private static final String END_TAG = "</ln>";
 
@@ -59,8 +63,10 @@ public class LN extends Node implements VersionedWriteLoggable {
      *
      * @see #getLastFormatChange
      */
+    // 记录该类最后一次发生日志格式变更时的日志版本号（Version 8）。
     private static final int LAST_FORMAT_CHANGE = 8;
-
+    // 存储实际用户数据的字节数组。
+    // 如果为 null 代表当前记录已被删除；如果为 ZERO_LENGTH_BYTE_ARRAY 代表长度为 0 的空数据。
     private byte[] data;
 
     /*
@@ -68,9 +74,13 @@ public class LN extends Node implements VersionedWriteLoggable {
      *
      * -Dirty means that the in-memory version is not present on disk.
      */
+    // 标志位掩码，第 31 位代表当前内存 LN 相比磁盘镜像已被修改（Dirty）。
     private static final int DIRTY_BIT = 0x80000000;
+    // 用于按位与清除脏标志的掩码。
     private static final int CLEAR_DIRTY_BIT = ~DIRTY_BIT;
+    // 用于按位与清除脏标志的掩码。
     private static final int FETCHED_COLD_BIT = 0x40000000;
+    // 组合非持久化标志位字段（包含 DIRTY_BIT 和 FETCHED_COLD_BIT）。
     private int flags; // not persistent
 
     /**
@@ -171,7 +181,7 @@ public class LN extends Node implements VersionedWriteLoggable {
     public boolean isLN() {
         return true;
     }
-
+    // 删除数据
     void makeDeleted() {
         data = null;
     }
@@ -262,12 +272,12 @@ public class LN extends Node implements VersionedWriteLoggable {
 
         return true;
     }
-
+    // 将当前 LN 标记为逻辑删除态（将底层 data 设为 null），并将其设为脏数据（setDirty()），以便后续写入删除日志。
     public void delete() {
         makeDeleted();
         setDirty();
     }
-
+    // 用新的字节数组替换旧的记录内容，并更新脏状态。
     public void modify(byte[] newData) {
         data = newData;
         setDirty();
@@ -529,27 +539,44 @@ public class LN extends Node implements VersionedWriteLoggable {
      * @param isInsertion True if the operation is an insertion (including
      * slot reuse). False otherwise.
      */
+    // 主要作用是将对某条记录（Record）进行的各种操作（如插入、更新、删除、迁移、后台检查点落盘等）生成对应的日志条目（Log Entry），
+    // 并将其写入磁盘日志管理器（LogManager），
+    // 同时在事务环境下处理好 Undo/Redo 恢复元数据、废弃空间回收（Obsolete Counting）以及新生成 LSN 的写锁绑定。
     private LogItem logInternal(
+        // JE 运行时环境实例。
         final EnvironmentImpl envImpl,
+        // 当前操作所属的数据库实例。
         final DatabaseImpl dbImpl,
+        // 执行当前操作的事务或锁定代理（如果是后台 Cleaner 迁移或 DW 异步落盘，此参数可为 null）。
         final Locker locker,
+        // 事务写锁信息对象。如果是由事务执行，它包含了用于事务中止（Abort/Rollback）时进行数据回滚所需的 Undo 元数据（如 abortLsn、abortKey、abortData 等）。
         final WriteLockInfo writeLockInfo,
+        // 新版本记录是否要作为“嵌入式/内联 LN”（直接存放在父 BIN 槽位中）。
         final boolean newEmbeddedLN,
+        // 新版本的键（Key）
         final byte[] newKey,
+        // 新的 TTL 过期时间（以天或小时为单位）。
         final int newExpiration,
+        // 过期时间单位是否为小时。
         final boolean newExpirationInHours,
+        // 当前旧版本记录是否是内联存储的。
         final boolean currEmbeddedLN,
+        // 当前槽位中记录的旧 LSN 值（用于计算废弃空间）。
         final long currLsn,
+        // 旧 LSN 对应日志记录的大小（用于废弃空间回收）。
         final int currSize,
+        // 指示本次操作是否为插入（或槽位复用）。
         final boolean isInsertion,
+        // 是否为后台 I/O 操作（如 Cleaner 触发的迁移）。
         final boolean backgroundIO,
+        // 高可用复制（HA）上下文信息。
         final ReplicationContext repContext)
         throws DatabaseException {
-
+        // 确保当前对象只能是标准 LN 或高可用 VersionedLN，且非这两个类时不能使用内联特性。
         assert(getClass() == LN.class ||
                getClass() == VersionedLN.class ||
                !newEmbeddedLN);
-
+        // 如果当前环境处于只读模式（Read-Only），严禁写入日志，直接抛出状态异常。
         if (envImpl.isReadOnly()) {
             /* Returning a NULL_LSN will not allow locking. */
             throw EnvironmentFailureException.unexpectedState(
@@ -585,11 +612,19 @@ public class LN extends Node implements VersionedWriteLoggable {
          *    local-write is false.  This is enforced by the ReadonlyTxn class
          *    which throws ReplicaWriteException in this case.
          */
+        // 复制一致性安全守卫（HA 隔离校验）
+        // 在启用了高可用复制（HA）的环境中，严格校验“复制事务只能写复制数据库，非复制事务只能写非复制数据库”，防止主从切换或故障转移时产生数据错乱。
+        // DbTree.NAME_DB_ID：JE 内部用于存储所有用户数据库元数据（如数据库名称、ID映射等）的系统命名数据库（NameDB）。
+        // 检查当前正在写入的目标数据库是不是 NameDB。如果是，则将其标记为 isNamingDB = true。
+        // 因为 NameDB 具有特殊性（它自身可能伴随复制环境存在，但内部的具体记录并不完全遵循普通用户库的隔离规则），所以后续的严格校验会对其进行豁免。
         final boolean isNamingDB = dbImpl.getId().equals(DbTree.NAME_DB_ID);
-
+        // 当前操作的目标不是内部的命名数据库（即普通的业务用户数据库）。
         if (!isNamingDB &&
+            // 当前整个 JE 运行环境处于高可用复制（HA）模式下。
             envImpl.isReplicated() &&
+            // 当前有明确的事务或锁定代理（Locker）正在执行写入操作（内部无锁迁移等内部操作暂不在此列）。
             locker != null &&
+            // 检查“目标数据库是否是复制库（dbImpl.isReplicated()）”与“执行写入的事务是否是复制事务（locker.isReplicated()）”两者是否发生矛盾：
             dbImpl.isReplicated() != locker.isReplicated()) {
 
             throw EnvironmentFailureException.unexpectedState(
@@ -607,9 +642,10 @@ public class LN extends Node implements VersionedWriteLoggable {
          * also true. The naming DB is exempt for the same reason as above.
          */
         if (!isNamingDB) {
-
+            // 判定当前事务是否为复制事务
             boolean isRepLocker = (locker != null) && locker.isReplicated();
-
+            // repContext.inReplicationStream()：当前操作是否正在复制流（Replication Stream）中执行。
+            // 例如，当从节点（Replica）收到主节点（Master）发来的日志并进行重放（Replay）时，该方法会返回 true；而如果是本地客户端直接发起的普通写入，则返回 false。
             if (repContext.inReplicationStream() != isRepLocker) {
                 throw EnvironmentFailureException.unexpectedState(
                     (isRepLocker ?
@@ -622,26 +658,35 @@ public class LN extends Node implements VersionedWriteLoggable {
                     ", dbName = " + dbImpl.getDebugName());
             }
         }
-
+        // 初始化事务与 Undo 回滚元数据
+        // 声明日志条目类型（例如是插入、更新还是删除，是否带有事务）。
         LogEntryType entryType;
+        // 声明底层的事务对象，默认设为 null（适用于非事务操作或后台内部日志写入）。
         Txn txn = null;
+        // 事务中止时需要回滚到的目标 LSN（即该事务修改该记录前的原始 LSN，称为 $La$）。默认无。
         long abortLsn = DbLsn.NULL_LSN;
+        // Abort Known Deleted 标记。指示在事务加锁前，该记录是否处于“已知删除”状态。
         boolean abortKD = false;
+        // 中止时的键（用于内联存储在父 BIN 中的记录键回滚）。
         byte[] abortKey = null;
+        // 中止时的数据（用于内联存储在父 BIN 中的记录值回滚）。
         byte[] abortData = null;
+        // 中止时的复制版本序列号。
         long abortVLSN = VLSN.NULL_VLSN_SEQUENCE;
+        // 中止时的 TTL 过期时间及单位。
         int abortExpiration = 0;
         boolean abortExpirationInHours = false;
-
+        // 实例化一个日志参数容器对象，后续所有传递给日志管理器（LogManager）的参数都会封装在这个对象中。
         LogParams params = new LogParams();
-
+        // 事务分支处理
         if (locker != null && locker.isTransactional()) {
-
+            // 如果当前在事务中，调用 getLogType 并传入 isTransactional = true，获取带事务特性的日志类型（例如 LOG_INS_LN_TRANSACTIONAL、LOG_UPD_LN_TRANSACTIONAL 等）。
             entryType = getLogType(isInsertion, true, dbImpl);
-
+            // 从当前的锁定代理（locker）中安全地提取出真正的事务对象 Txn，并通过断言确保其不为空。
             txn = locker.getTxnLocker();
             assert(txn != null);
-
+            // 提取 Undo 元数据
+            // 通过游标加写锁时生成的 writeLockInfo，一口气拉取了事务开始修改该记录前的所有“快照状态”（即 Abort LSN、是否删除、键、数据、VLSN、过期时间等）。
             abortLsn = writeLockInfo.getAbortLsn();
             abortKD = writeLockInfo.getAbortKnownDeleted();
             abortKey = writeLockInfo.getAbortKey();
@@ -649,13 +694,13 @@ public class LN extends Node implements VersionedWriteLoggable {
             abortVLSN = writeLockInfo.getAbortVLSN();
             abortExpiration = writeLockInfo.getAbortExpiration();
             abortExpirationInHours = writeLockInfo.isAbortExpirationInHours();
-
+            // 如果该事务曾经发生过回滚重试，允许处理重复的废弃空间计数。
             params.obsoleteDupsAllowed = locker.isRolledBack();
 
         } else {
             entryType = getLogType(isInsertion, false, dbImpl);
         }
-
+        // 创建日志条目与设置 Provisional 属性
         params.entry = createLogEntry(
             entryType, dbImpl, txn,
             abortLsn, abortKD, abortKey, abortData, abortVLSN,
@@ -682,6 +727,7 @@ public class LN extends Node implements VersionedWriteLoggable {
          * op is an insertion (which implies Rc is a deletion and as such has
          * been counted already) or Rc is embedded.
          */
+        // 废弃空间计算（Obsolete Counting）
         if (currLsn != abortLsn &&
             !dbImpl.isLNImmediatelyObsolete() &&
             !isInsertion &&
@@ -699,7 +745,7 @@ public class LN extends Node implements VersionedWriteLoggable {
         if (txn != null && currLsn == abortLsn) {
             writeLockInfo.setAbortLogSize(currSize);
         }
-
+        // 执行真实的磁盘日志写入
         LogItem item;
         try {
             if (txn != null) {
@@ -746,6 +792,7 @@ public class LN extends Node implements VersionedWriteLoggable {
          * given as input to this method refer to the same logical record,
          * the info from the given WriteLockInfo is copied to the new one.
          */
+        // 为新生成的 LSN 自动加写锁
         if (locker != null) {
             final long newLsn = item.lsn;
 
@@ -759,6 +806,7 @@ public class LN extends Node implements VersionedWriteLoggable {
         }
 
         /* In a dup DB, do not expect embedded LNs or non-empty data. */
+        // 重复键数据库防错校验与返回
         if (dbImpl.getSortedDuplicates() &&
             (newEmbeddedLN || (data != null && data.length > 0))) {
 

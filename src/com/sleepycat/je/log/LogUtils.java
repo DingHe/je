@@ -156,11 +156,15 @@ public class LogUtils {
     /**
      * Write a packed int into the log.
      */
+    // 将一个整型数字（int）通过变长压缩（Packed Integer）的方式直接写入到 NIO 的 ByteBuffer 日志缓冲区中，并自动推进缓冲区的位置指针。
     public static void writePackedInt(ByteBuffer logBuf, int i) {
+        // 获取 ByteBuffer 背后的原始字节数组（Array）在内存中的起始偏移量。
         int off = logBuf.arrayOffset();
+        // 写入压缩整数
         int newPos =
             PackedInteger.writeInt(logBuf.array(),
                                    logBuf.position() + off, i);
+        // 同步更新 ByteBuffer 的位置指针
         logBuf.position(newPos - off);
     }
 

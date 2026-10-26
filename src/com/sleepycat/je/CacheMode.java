@@ -143,6 +143,13 @@ package com.sleepycat.je;
  * @see <a href="EnvironmentStats.html#cacheSizing">Cache Statistics:
  * Sizing</a>
  */
+// 精细控制 Berkeley DB JE 内存缓存（In-Memory Cache）中记录的缓存行为
+// 在执行数据的存储（Store）或检索（Retrieve）操作时，CacheMode 决定了该记录相对于其他记录在内存中保留的时间长短（即“热度”）。JE 默认使用近似的 LRU（最近最少使用）算法来管理内存缓存溢出时的页面驱逐。通过 CacheMode，开发者可以显式干预这一默认行为：
+// JE 缓存机制核心概念说明
+// LN (Leaf Node，叶子节点)：存储实际用户记录（键值对数据）的节点。
+// BIN (Bottom Internal Node，底层内部节点)：B树的底层内部节点，每个 BIN 大约包含 100 个 LN。JE 在 LRU 链表上追踪的是 BIN 而不是单独的 LN。访问某个 LN 会使其所在的 BIN 变为“热（Hot）”。
+// Dirty（脏数据）：已被修改但尚未刷写到磁盘日志文件中的内存节点。
+// Off-Heap Cache（堆外缓存）：如果配置了堆外内存缓存，从主内存驱逐的记录可以放入堆外缓存中。
 public enum CacheMode {
 
     /**
@@ -167,12 +174,17 @@ public enum CacheMode {
      *     will remain there.</li>
      * <ul>
      */
+    // 默认的缓存模式。
+    // 操作会将记录的“热度”更新为“最近最使用（Most Recently Used）”。
+    // 包含该记录 LN 的 BIN 将保留在主缓存中，并被移动到 LRU 链表的热端（Hot End）。
     DEFAULT,
 
     /**
      * @deprecated please use {@link #DEFAULT} instead. As of JE 4.0, this mode
      * functions exactly as if {@link #DEFAULT} were specified.
      */
+    // 保持热点状态。
+    // 自 JE 4.0 起已过时，请改用 DEFAULT。
     KEEP_HOT,
 
     /**
@@ -241,12 +253,16 @@ public enum CacheMode {
      *     cache, will also not be changed.</li>
      * </ul>
      */
+    // 保持记录的缓存热度或冷度不变，不扰乱缓存。
+    // 典型场景：当你需要遍历（Scan）数据库中的所有记录，又希望这次扫描不会把原本在缓存中的热点数据挤出去时使用。
     UNCHANGED,
 
     /**
      * @deprecated please use {@link #UNCHANGED} instead. As of JE 4.0, this
      * mode functions exactly as if {@link #UNCHANGED} were specified.
      */
+    // 使记录变冷。
+    // 在 JE 4.0 及之后的版本中，它的行为与 UNCHANGED 完全相同。
     MAKE_COLD,
 
     /**
@@ -278,6 +294,8 @@ public enum CacheMode {
      *
      * @since 3.3.98
      */
+    // 操作完成后立即驱逐记录的叶子节点（LN），同时将包含该 LN 的 BIN 移到 LRU 热端。
+    // 典型场景：当 LN 总量超出主缓存容量，应用程序宁愿在再次访问时从磁盘日志或堆外缓存中重新读取 LN，也不愿让 LN 占用宝贵的 JVM 堆内存（从而避免引发昂贵的 Java GC）。这允许文件系统缓存或堆外缓存去托管 LN，而主缓存专注于存放树形索引节点（BIN 和 IN）。
     EVICT_LN,
 
     /**
@@ -345,6 +363,8 @@ public enum CacheMode {
      *
      * @since 4.0.97
      */
+    // 操作完成后，将记录的 BIN（以及属于该 BIN 的所有 LN）全部驱逐出主缓存。
+    // 典型场景：当整个数据库的 BIN 无法全部容纳于主缓存中时使用。由于它会驱逐整个 BIN 内的所有 LN（即使某些 LN 对其他访问者来说是“热”的），因此需要谨慎使用。最常见的使用方式是全局所有访问者都采用此模式（配置在 Database 或 Environment 级别）。
     EVICT_BIN,
 
     /**
@@ -353,5 +373,6 @@ public enum CacheMode {
      * Placeholder to avoid DPL class evolution errors. Never actually used.
      * @since 4.0.97
      */
+    // 动态占位符（内部保留）。
     DYNAMIC
 }
